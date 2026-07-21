@@ -2,12 +2,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from email.utils import parsedate_to_datetime
+import logging
 import time
 from typing import Any
 
 import requests
 
-from sources.base import CatalogueSource, SourceError
+from sources.base import CatalogueSource, SourceCapabilities, SourceError
 from sources.schema import with_base
 
 
@@ -16,10 +17,10 @@ class DiscogsConfig:
     token: str
     per_page: int = 100
     max_pages: int = 10
-    include_tracklist: bool = True
+    include_tracklist: bool = False
     include_notes: bool = False
     include_companies: bool = False
-    include_identifiers: bool = True
+    include_identifiers: bool = False
     include_videos: bool = False
     max_retries: int = 3
     min_retry_delay: float = 1.0
@@ -31,10 +32,10 @@ class DiscogsConfig:
             token=str(settings.get("token", "") or ""),
             per_page=int(settings.get("per_page", 100) or 100),
             max_pages=int(settings.get("max_pages", 10) or 10),
-            include_tracklist=bool(settings.get("include_tracklist", True)),
+            include_tracklist=bool(settings.get("include_tracklist", False)),
             include_notes=bool(settings.get("include_notes", False)),
             include_companies=bool(settings.get("include_companies", False)),
-            include_identifiers=bool(settings.get("include_identifiers", True)),
+            include_identifiers=bool(settings.get("include_identifiers", False)),
             include_videos=bool(settings.get("include_videos", False)),
             max_retries=int(settings.get("max_retries", 3) or 3),
             min_retry_delay=float(settings.get("min_retry_delay", 1.0) or 1.0),
@@ -45,6 +46,7 @@ class DiscogsConfig:
 class DiscogsConnector(CatalogueSource):
     source_name = "Discogs"
     supported_lookup_types = {"barcode", "catalogue_number", "label", "artist", "title"}
+    capabilities = SourceCapabilities(frozenset(supported_lookup_types), max_page_size=100, supports_pagination=True, credentials_required=True, rate_limit="HTTP 429 retries respect Retry-After and Discogs rate-limit reset headers.")
     BASE_URL = "https://api.discogs.com"
 
     def __init__(self, config: DiscogsConfig):
@@ -63,6 +65,8 @@ class DiscogsConnector(CatalogueSource):
         self.min_retry_delay = max(0.0, config.min_retry_delay)
         self.max_retry_delay = max(self.min_retry_delay, config.max_retry_delay)
         self._release_cache: dict[str, dict[str, Any]] = {}
+        self._request_count = 0
+        self._logger = logging.getLogger(__name__)
 
         self.session = requests.Session()
         self.session.headers.update({
@@ -100,10 +104,16 @@ class DiscogsConnector(CatalogueSource):
 
     def _get(self, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         for attempt in range(self.max_retries + 1):
+            started = time.monotonic()
             response = self.session.get(
                 f"{self.BASE_URL}{path}",
                 params=params,
                 timeout=30,
+            )
+            self._request_count += 1
+            self._logger.debug(
+                "Discogs request endpoint=%s count=%s status=%s retry=%s elapsed=%.3fs",
+                path, self._request_count, response.status_code, attempt, time.monotonic() - started,
             )
 
             if response.status_code == 429:
@@ -257,6 +267,44 @@ class DiscogsConnector(CatalogueSource):
             },
         )
 
+
+    def _detail_required(self, lookup_type: str) -> bool:
+        if lookup_type in {"barcode", "catalogue_number"}:
+            return True
+        return any([
+            self.include_tracklist,
+            self.include_notes,
+            self.include_companies,
+            self.include_identifiers,
+            self.include_videos,
+        ])
+
+    def _search_result_to_row(self, result: dict[str, Any], lookup_value: str = "") -> dict[str, Any]:
+        labels = result.get("label") or []
+        catnos = result.get("catno") or []
+        formats = result.get("format") or []
+        title = str(result.get("title", "") or "")
+        artist = ""
+        release_title = title
+        if " - " in title:
+            artist, release_title = title.split(" - ", 1)
+        image = result.get("cover_image") or result.get("thumb") or ""
+        return with_base({
+            "Discogs Release ID": result.get("id"),
+            "Discogs Master ID": result.get("master_id"),
+            "Discogs URL": result.get("uri") or result.get("resource_url", ""),
+            "Artist": artist,
+            "Title": release_title,
+            "Label": "; ".join(str(v).strip() for v in labels if str(v).strip()),
+            "Catalogue Number": "; ".join(str(v).strip() for v in catnos if str(v).strip()),
+            "Format": "; ".join(str(v).strip() for v in formats if str(v).strip()),
+            "Country": result.get("country", ""),
+            "Release Year": result.get("year", ""),
+            "Genres": "; ".join(result.get("genre") or []),
+            "Styles": "; ".join(result.get("style") or []),
+            "Main Image URL": image,
+        }, Source=self.source_name, **{"Result Entity Type": "Release", "Lookup UPC/EAN": lookup_value, "Source Record ID": result.get("id", ""), "Source Record URL": result.get("uri") or result.get("resource_url", ""), "Barcode": lookup_value})
+
     def get_release(self, release_id: str | int) -> dict[str, Any]:
         cache_key = str(release_id).strip()
         if cache_key not in self._release_cache:
@@ -270,8 +318,9 @@ class DiscogsConnector(CatalogueSource):
         )
         return [dict(result) for result in (search.get("results") or [])]
 
-    def _database_search_rows(self, params: dict[str, Any], lookup_value: str = "") -> list[dict[str, Any]]:
+    def _database_search_rows(self, params: dict[str, Any], lookup_value: str = "", lookup_type: str = "") -> list[dict[str, Any]]:
         release_ids: list[int] = []
+        unique_results: list[dict[str, Any]] = []
 
         for page in range(1, self.max_pages + 1):
             search = self._get(
@@ -289,12 +338,16 @@ class DiscogsConnector(CatalogueSource):
                 release_id = result.get("id")
                 if release_id and release_id not in release_ids:
                     release_ids.append(release_id)
+                    unique_results.append(dict(result))
 
             pagination = search.get("pagination") or {}
             total_pages = int(pagination.get("pages") or 1)
 
             if page >= total_pages or not results:
                 break
+
+        if not self._detail_required(lookup_type):
+            return [self._search_result_to_row(result, lookup_value) for result in unique_results]
 
         rows: list[dict[str, Any]] = []
         for release_id in release_ids:
@@ -313,7 +366,7 @@ class DiscogsConnector(CatalogueSource):
         }[lookup_type]
 
     def search_by_type(self, lookup_type: str, value: str) -> list[dict[str, Any]]:
-        return self._database_search_rows(self._search_params_for_type(lookup_type, value), value)
+        return self._database_search_rows(self._search_params_for_type(lookup_type, value), value, lookup_type)
 
     def lookup(self, barcode: str) -> list[dict[str, Any]]:
-        return self._database_search_rows({"barcode": barcode}, barcode)
+        return self._database_search_rows({"barcode": barcode}, barcode, "barcode")
