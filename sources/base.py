@@ -1,9 +1,19 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from typing import Any
 
 from sources.lookup import LookupStatus
+
+
+@dataclass(frozen=True)
+class SourceCapabilities:
+    supported_lookup_types: frozenset[str]
+    max_page_size: int | None = None
+    supports_pagination: bool = False
+    credentials_required: bool = False
+    rate_limit: str = ""
 
 
 class SourceError(RuntimeError):
@@ -20,6 +30,7 @@ class CatalogueSource(ABC):
 
     source_name: str
     supported_lookup_types: set[str] = {"barcode"}
+    capabilities: SourceCapabilities | None = None
 
     def supports_lookup_type(self, lookup_type: str) -> bool:
         return lookup_type in self.supported_lookup_types

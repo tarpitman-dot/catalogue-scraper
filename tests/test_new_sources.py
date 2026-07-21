@@ -393,3 +393,78 @@ def test_bulk_lookup_preserves_earlier_successful_rows_after_later_discogs_failu
 
     assert list(df["Lookup Status"]) == ["Found", "Source error"]
     assert df.iloc[0]["Title"] == "first"
+
+def test_apple_music_catalog_search_limit_never_exceeds_25_for_artist_and_title():
+    client = QueueClient([
+        {"results": {"albums": {"data": []}}},
+        {"results": {"albums": {"data": []}}},
+    ])
+    apple = AppleConnector(AppleConfig("dev", "gb"), client)
+
+    apple.search_by_type("artist", "Burial")
+    apple.search_by_type("title", "Untrue")
+
+    limits = [int(call[1]["params"]["limit"]) for call in client.calls]
+    assert limits == [25, 25]
+    assert all(limit <= 25 for limit in limits)
+
+
+def test_itunes_search_limit_stays_independent_at_200():
+    client = QueueClient([{"results": []}])
+
+    AppleConnector(AppleConfig("", "gb"), client).search_by_type("artist", "Burial")
+
+    assert client.calls[0][1]["params"]["limit"] == "200"
+
+
+def test_apple_music_search_paginates_without_exceeding_25():
+    page = [{"id": str(i), "attributes": {"name": f"A{i}", "artistName": "Burial", "artwork": {}}} for i in range(25)]
+    client = QueueClient([
+        {"results": {"albums": {"data": page, "next": "/next"}}},
+        {"results": {"albums": {"data": [{"id": "26", "attributes": {"name": "A26", "artistName": "Burial", "artwork": {}}}]}}},
+    ])
+
+    rows = AppleConnector(AppleConfig("dev", "gb"), client).search_by_type("artist", "Burial")
+
+    assert len(rows) == 26
+    assert [int(call[1]["params"]["limit"]) for call in client.calls] == [25, 25]
+    assert client.calls[1][1]["params"]["offset"] == "25"
+
+
+def test_discogs_broad_artist_search_uses_summary_rows_without_release_fetch():
+    discogs = _discogs_for_test([
+        FakeResponse(200, {"results": [{"id": 7, "title": "Burial - Untrue", "label": ["Hyperdub"], "catno": ["HDBCD002"], "format": ["CD"], "year": "2007", "cover_image": "img"}], "pagination": {"pages": 1}}),
+    ])
+
+    rows = discogs.search_by_type("artist", "Burial")
+
+    assert len(rows) == 1
+    assert rows[0]["Artist"] == "Burial"
+    assert rows[0]["Title"] == "Untrue"
+    assert len(discogs.session.calls) == 1
+
+
+def test_discogs_detail_option_fetches_duplicate_release_once_for_broad_search():
+    discogs = _discogs_for_test([
+        FakeResponse(200, {"results": [{"id": 7}, {"id": 7}], "pagination": {"pages": 1}}),
+        FakeResponse(200, {"id": 7, "title": "D"}),
+    ])
+    discogs.include_tracklist = True
+
+    rows = discogs.search_by_type("artist", "Burial")
+
+    assert len(rows) == 1
+    assert [call[0] for call in discogs.session.calls].count("https://api.discogs.com/releases/7") == 1
+
+
+def test_single_lookup_status_rows_are_not_rendered_as_result_cards(monkeypatch):
+    import pandas as pd, app
+    calls = {"subheader": [], "error": [], "info": []}
+    monkeypatch.setattr(app.st, "subheader", lambda value: calls["subheader"].append(value))
+    monkeypatch.setattr(app.st, "error", lambda value: calls["error"].append(value))
+    monkeypatch.setattr(app.st, "info", lambda value: calls["info"].append(value))
+
+    app.render_single_result_cards(pd.DataFrame([{"Source": "Discogs", "Lookup Status": "Source error", "Error": "Discogs rate limit reached."}]))
+
+    assert calls["subheader"] == []
+    assert calls["error"] == ["Discogs: Source error — Discogs rate limit reached."]

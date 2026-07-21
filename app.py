@@ -172,7 +172,7 @@ def source_settings_ui(source_key: str) -> dict:
             )
             include_tracklist = st.checkbox(
                 "Include track listing",
-                value=True,
+                value=False,
                 key="discogs_tracklist",
             )
             include_notes = st.checkbox(
@@ -187,7 +187,7 @@ def source_settings_ui(source_key: str) -> dict:
             )
             include_identifiers = st.checkbox(
                 "Include identifiers",
-                value=True,
+                value=False,
                 key="discogs_identifiers",
             )
             include_videos = st.checkbox(
@@ -320,7 +320,25 @@ def render_single_result_cards(df: pd.DataFrame) -> None:
         st.info("No results found.")
         return
 
-    for _, row in df.iterrows():
+    status_rows = df[df.get("Lookup Status", "") != LookupStatus.FOUND] if "Lookup Status" in df.columns else df.iloc[0:0]
+    found_rows = df[df.get("Lookup Status", "") == LookupStatus.FOUND] if "Lookup Status" in df.columns else df
+
+    if not status_rows.empty:
+        for _, row in status_rows.iterrows():
+            status = str(row.get("Lookup Status", "Status") or "Status")
+            source = str(row.get("Source", "") or "").strip()
+            error = str(row.get("Error", "") or "").strip()
+            message = f"{source}: {status}" if source else status
+            if error:
+                message = f"{message} — {error}"
+            if status == LookupStatus.ERROR:
+                st.error(message)
+            elif status in {LookupStatus.NO_RESULTS, LookupStatus.UNSUPPORTED, LookupStatus.INVALID, LookupStatus.NOT_CONFIGURED}:
+                st.info(message)
+            else:
+                st.warning(message)
+
+    for _, row in found_rows.iterrows():
         with st.container(border=True):
             title = str(row.get("Title", "") or "Untitled")
             artist = str(row.get("Artist", "") or "")
