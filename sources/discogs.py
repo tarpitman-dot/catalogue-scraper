@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from email.utils import parsedate_to_datetime
+import time
 from typing import Any
 
 import requests
@@ -19,6 +21,9 @@ class DiscogsConfig:
     include_companies: bool = False
     include_identifiers: bool = True
     include_videos: bool = False
+    max_retries: int = 3
+    min_retry_delay: float = 1.0
+    max_retry_delay: float = 60.0
 
     @classmethod
     def from_settings(cls, settings: dict[str, Any]) -> "DiscogsConfig":
@@ -31,6 +36,9 @@ class DiscogsConfig:
             include_companies=bool(settings.get("include_companies", False)),
             include_identifiers=bool(settings.get("include_identifiers", True)),
             include_videos=bool(settings.get("include_videos", False)),
+            max_retries=int(settings.get("max_retries", 3) or 3),
+            min_retry_delay=float(settings.get("min_retry_delay", 1.0) or 1.0),
+            max_retry_delay=float(settings.get("max_retry_delay", 60.0) or 60.0),
         )
 
 
@@ -51,6 +59,10 @@ class DiscogsConnector(CatalogueSource):
         self.include_companies = config.include_companies
         self.include_identifiers = config.include_identifiers
         self.include_videos = config.include_videos
+        self.max_retries = max(0, config.max_retries)
+        self.min_retry_delay = max(0.0, config.min_retry_delay)
+        self.max_retry_delay = max(self.min_retry_delay, config.max_retry_delay)
+        self._release_cache: dict[str, dict[str, Any]] = {}
 
         self.session = requests.Session()
         self.session.headers.update({
@@ -59,23 +71,57 @@ class DiscogsConnector(CatalogueSource):
             "Accept": "application/vnd.discogs.v2.discogs+json",
         })
 
-    def _get(self, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        response = self.session.get(
-            f"{self.BASE_URL}{path}",
-            params=params,
-            timeout=30,
-        )
+    def _retry_delay(self, response: requests.Response, attempt: int) -> float:
+        retry_after = response.headers.get("Retry-After")
+        if retry_after:
+            try:
+                return min(float(retry_after), self.max_retry_delay)
+            except ValueError:
+                try:
+                    seconds = (parsedate_to_datetime(retry_after).timestamp() - time.time())
+                    return min(max(0.0, seconds), self.max_retry_delay)
+                except (TypeError, ValueError, OverflowError):
+                    pass
 
-        if response.status_code == 429:
-            raise SourceError("Discogs rate limit reached.")
-        if response.status_code == 401:
-            raise SourceError("Discogs rejected the token.")
-        if not response.ok:
-            raise SourceError(
-                f"Discogs request failed ({response.status_code}): "
-                f"{response.text[:200]}"
+        remaining = response.headers.get("X-Discogs-Ratelimit-Remaining")
+        reset = response.headers.get("X-Discogs-Ratelimit-Reset")
+        if remaining == "0" and reset:
+            try:
+                reset_delay = float(reset)
+                # Discogs exposes seconds until reset in this header. If a proxy ever
+                # passes an epoch timestamp, convert that to seconds from now.
+                if reset_delay > 1_000_000_000:
+                    reset_delay -= time.time()
+                return min(max(0.0, reset_delay), self.max_retry_delay)
+            except ValueError:
+                pass
+
+        return min(self.min_retry_delay * (2 ** attempt), self.max_retry_delay)
+
+    def _get(self, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        for attempt in range(self.max_retries + 1):
+            response = self.session.get(
+                f"{self.BASE_URL}{path}",
+                params=params,
+                timeout=30,
             )
-        return response.json()
+
+            if response.status_code == 429:
+                if attempt >= self.max_retries:
+                    raise SourceError("Discogs rate limit reached after retries; please try again later.")
+                delay = self._retry_delay(response, attempt)
+                time.sleep(delay)
+                continue
+            if response.status_code == 401:
+                raise SourceError("Discogs rejected the token.")
+            if not response.ok:
+                raise SourceError(
+                    f"Discogs request failed ({response.status_code}): "
+                    f"{response.text[:200]}"
+                )
+            return response.json()
+
+        raise SourceError("Discogs request failed unexpectedly after retries.")
 
     @staticmethod
     def _join_names(items: list[dict[str, Any]] | None, key: str = "name") -> str:
@@ -212,7 +258,10 @@ class DiscogsConnector(CatalogueSource):
         )
 
     def get_release(self, release_id: str | int) -> dict[str, Any]:
-        return self._get(f"/releases/{release_id}")
+        cache_key = str(release_id).strip()
+        if cache_key not in self._release_cache:
+            self._release_cache[cache_key] = self._get(f"/releases/{cache_key}")
+        return self._release_cache[cache_key]
 
     def search(self, text: str) -> list[dict[str, Any]]:
         search = self._get(
@@ -238,7 +287,7 @@ class DiscogsConnector(CatalogueSource):
             results = search.get("results") or []
             for result in results:
                 release_id = result.get("id")
-                if release_id:
+                if release_id and release_id not in release_ids:
                     release_ids.append(release_id)
 
             pagination = search.get("pagination") or {}
