@@ -33,6 +33,7 @@ def read_input(uploaded_file) -> pd.DataFrame:
 
 
 def excel_bytes(df: pd.DataFrame) -> bytes:
+    validate_found_row_sources(df)
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         df.to_excel(writer, index=False, sheet_name="Catalogue Results")
@@ -48,6 +49,47 @@ def excel_bytes(df: pd.DataFrame) -> bytes:
 
     return output.getvalue()
 
+
+
+def is_blank_value(value: object) -> bool:
+    if value is None:
+        return True
+    try:
+        if pd.isna(value):
+            return True
+    except (TypeError, ValueError):
+        pass
+    return not str(value).strip()
+
+
+def source_name_for_record(record: dict, fallback_source_name: str) -> str:
+    source = record.get("Source")
+    if is_blank_value(source):
+        return fallback_source_name
+    return str(source).strip()
+
+
+def found_result_row(
+    base_values: dict,
+    record: dict,
+    fallback_source_name: str,
+) -> dict:
+    row = {**base_values, **record}
+    row["Source"] = source_name_for_record(record, fallback_source_name)
+    return row
+
+
+def validate_found_row_sources(df: pd.DataFrame) -> None:
+    if df.empty or "Lookup Status" not in df.columns:
+        return
+    found = df[df["Lookup Status"] == "Found"]
+    if found.empty:
+        return
+    if "Source" not in found.columns:
+        raise ValueError("Export validation failed: found rows are missing the Source column.")
+    invalid = found[found["Source"].map(is_blank_value)]
+    if not invalid.empty:
+        raise ValueError("Export validation failed: found rows must have a non-blank Source.")
 
 def get_secret(name: str, default: str = "") -> str:
     try:
@@ -194,14 +236,20 @@ def run_bulk_lookup(
                 else:
                     total_results = len(records)
                     for result_number, record in enumerate(records, start=1):
-                        output_rows.append({**input_data, "Lookup Status": "Found", "Result Number": result_number, "Results For Barcode": total_results, **record})
+                        output_rows.append(found_result_row(
+                            {**input_data, "Lookup Status": "Found", "Result Number": result_number, "Results For Barcode": total_results},
+                            record,
+                            source_definition.display_name,
+                        ))
             except SourceError as exc:
                 output_rows.append({**input_data, "Source": source_definition.display_name, "Lookup Status": "Error", "Result Number": "", "Results For Barcode": 0, "Error": str(exc)})
 
         progress.progress(idx / total)
 
     status.empty()
-    return pd.DataFrame(output_rows)
+    results = pd.DataFrame(output_rows)
+    validate_found_row_sources(results)
+    return results
 
 
 def render_single_result_cards(df: pd.DataFrame) -> None:
@@ -294,10 +342,16 @@ with search_tab:
                     try:
                         records = lookup_barcode(source_key, barcode, settings_by_source.get(source_key, {}))
                         for n, record in enumerate(records, start=1):
-                            all_rows.append({"Lookup UPC/EAN": barcode, "Lookup Status": "Found", "Result Number": n, "Results For Barcode": len(records), **record})
+                            all_rows.append(found_result_row(
+                                {"Lookup UPC/EAN": barcode, "Lookup Status": "Found", "Result Number": n, "Results For Barcode": len(records)},
+                                record,
+                                SOURCE_REGISTRY[source_key].display_name,
+                            ))
                     except SourceError as exc:
                         all_rows.append({"Lookup UPC/EAN": barcode, "Source": SOURCE_REGISTRY[source_key].display_name, "Lookup Status": "Error", "Error": str(exc)})
-                st.session_state["single_results"] = pd.DataFrame(all_rows)
+                single_results = pd.DataFrame(all_rows)
+                validate_found_row_sources(single_results)
+                st.session_state["single_results"] = single_results
             except SourceError as exc:
                 st.error(str(exc))
 

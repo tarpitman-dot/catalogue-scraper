@@ -10,6 +10,6 @@ BASE_COLUMNS = [
 
 def with_base(row: dict[str, Any], **values: Any) -> dict[str, Any]:
     base = {column: "" for column in BASE_COLUMNS}
-    base.update(values)
     base.update(row)
+    base.update(values)
     return base

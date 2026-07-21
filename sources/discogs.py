@@ -6,6 +6,7 @@ from typing import Any
 import requests
 
 from sources.base import CatalogueSource, SourceError
+from sources.schema import with_base
 
 
 @dataclass(frozen=True)
@@ -140,7 +141,7 @@ class DiscogsConnector(CatalogueSource):
                 values.append(f"{entity_type}: {name}".strip(": "))
         return " | ".join(values)
 
-    def _release_to_row(self, release: dict[str, Any]) -> dict[str, Any]:
+    def _release_to_row(self, release: dict[str, Any], lookup_barcode: str = "") -> dict[str, Any]:
         labels = release.get("labels") or []
         images = release.get("images") or []
         image_urls = [
@@ -197,7 +198,16 @@ class DiscogsConnector(CatalogueSource):
                 if str(video.get("uri", "")).strip()
             )
 
-        return row
+        return with_base(
+            row,
+            Source=self.source_name,
+            **{
+                "Lookup UPC/EAN": lookup_barcode,
+                "Source Record ID": release.get("id", ""),
+                "Source Record URL": release.get("uri", ""),
+                "Barcode": lookup_barcode,
+            },
+        )
 
     def get_release(self, release_id: str | int) -> dict[str, Any]:
         return self._get(f"/releases/{release_id}")
@@ -238,6 +248,6 @@ class DiscogsConnector(CatalogueSource):
         rows: list[dict[str, Any]] = []
         for release_id in release_ids:
             release = self.get_release(release_id)
-            rows.append(self._release_to_row(release))
+            rows.append(self._release_to_row(release, barcode))
 
         return rows
