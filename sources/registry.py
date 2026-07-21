@@ -27,7 +27,7 @@ def placeholder_factory(source_name: str) -> ConnectorFactory: return lambda set
 
 SOURCE_REGISTRY: dict[str, SourceDefinition] = {
     "discogs": SourceDefinition("discogs", "Discogs", "Music release metadata, labels, formats, track listings and image URLs.", True, ("DISCOGS_TOKEN",), create_discogs_connector),
-    "musicbrainz": SourceDefinition("musicbrainz", "MusicBrainz + Cover Art Archive", "Official MusicBrainz release metadata enriched with Cover Art Archive image URLs.", True, ("MUSICBRAINZ_CONTACT",), create_mb_connector, no_credentials=True),
+    "musicbrainz": SourceDefinition("musicbrainz", "MusicBrainz", "Official MusicBrainz release metadata enriched with Cover Art Archive image URLs.", True, ("MUSICBRAINZ_CONTACT",), create_mb_connector, no_credentials=True),
     "spotify": SourceDefinition("spotify", "Spotify", "Spotify Web API album metadata by UPC.", True, ("SPOTIFY_CLIENT_ID", "SPOTIFY_CLIENT_SECRET"), create_spotify_connector),
     "apple": SourceDefinition("apple", "Apple Music / iTunes", "Apple Music catalogue UPC lookup, falling back to public iTunes Lookup.", True, ("APPLE_MUSIC_DEVELOPER_TOKEN",), create_apple_connector, no_credentials=True),
     "amazon": SourceDefinition("amazon", "Amazon", "ASIN, retail metadata, package dimensions, weights and images; awaiting access.", False, ("AMAZON_CLIENT_ID", "AMAZON_CLIENT_SECRET", "AMAZON_REFRESH_TOKEN", "AMAZON_SELLER_ID"), placeholder_factory("Amazon"), planned=True),
