@@ -248,3 +248,148 @@ def test_discogs_found_row_keeps_found_status_and_is_counted_and_validated(monke
     assert df.iloc[0]["Lookup Status"] == "Found"
     assert int((df["Lookup Status"] == "Found").sum()) == 1
     app.validate_found_row_sources(df)
+
+
+def test_apple_artist_search_uses_artist_term_and_rejects_title_only_match():
+    client = QueueClient([{"results": [{"collectionId": 1, "collectionName": "Burial", "artistName": "Unrelated"}]}])
+
+    rows = AppleConnector(AppleConfig("", "gb"), client).search_by_type("artist", "Burial")
+
+    assert rows == []
+    assert client.calls[0][1]["params"]["attribute"] == "artistTerm"
+    assert client.calls[0][1]["params"]["entity"] == "album"
+
+
+def test_apple_artist_search_keeps_exact_case_insensitive_and_collaboration_matches():
+    client = QueueClient([{"results": [
+        {"collectionId": 1, "collectionName": "A", "artistName": "Burial"},
+        {"collectionId": 2, "collectionName": "B", "artistName": " burial "},
+        {"collectionId": 3, "collectionName": "C", "artistName": "Four Tet & Burial"},
+        {"collectionId": 4, "collectionName": "Burial", "artistName": "Different Artist"},
+    ]}])
+
+    rows = AppleConnector(AppleConfig("", "gb"), client).search_by_type("artist", " Burial ")
+
+    assert [row["Artist"] for row in rows] == ["Burial", " burial ", "Four Tet & Burial"]
+
+
+def test_apple_music_artist_search_filters_album_results_by_artist_credit():
+    client = QueueClient([{"results": {"albums": {"data": [
+        {"id": "1", "attributes": {"name": "Burial", "artistName": "Other", "artwork": {}}},
+        {"id": "2", "attributes": {"name": "A", "artistName": "Burial & Four Tet", "artwork": {}}},
+    ]}}}])
+
+    rows = AppleConnector(AppleConfig("dev", "gb"), client).search_by_type("artist", "burial")
+
+    assert [row["Source Record ID"] for row in rows] == ["2"]
+    assert client.calls[0][0] == "https://api.music.apple.com/v1/catalog/gb/search"
+    assert client.calls[0][1]["params"]["types"] == "albums"
+
+
+class FakeResponse:
+    def __init__(self, status_code, payload=None, headers=None, text=""):
+        self.status_code = status_code
+        self._payload = payload or {}
+        self.headers = headers or {}
+        self.text = text
+        self.ok = 200 <= status_code < 300
+
+    def json(self):
+        return self._payload
+
+
+class FakeSession:
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.calls = []
+        self.headers = {}
+
+    def get(self, url, **kwargs):
+        self.calls.append((url, kwargs))
+        return self.responses.pop(0)
+
+
+def _discogs_for_test(responses):
+    from sources.discogs import DiscogsConfig, DiscogsConnector
+    discogs = DiscogsConnector(DiscogsConfig("token", max_retries=2, min_retry_delay=0, max_retry_delay=0))
+    discogs.session = FakeSession(responses)
+    return discogs
+
+
+def test_discogs_first_429_retries_and_succeeds(monkeypatch):
+    import sources.discogs as discogs_module
+    monkeypatch.setattr(discogs_module.time, "sleep", lambda delay: None)
+    discogs = _discogs_for_test([
+        FakeResponse(429, headers={"Retry-After": "0"}),
+        FakeResponse(200, {"ok": True}),
+    ])
+
+    assert discogs._get("/database/search") == {"ok": True}
+    assert len(discogs.session.calls) == 2
+
+
+def test_discogs_repeated_429_exhausts_retries(monkeypatch):
+    import sources.discogs as discogs_module
+    monkeypatch.setattr(discogs_module.time, "sleep", lambda delay: None)
+    discogs = _discogs_for_test([FakeResponse(429), FakeResponse(429), FakeResponse(429)])
+
+    try:
+        discogs._get("/database/search")
+    except SourceError as exc:
+        assert "after retries" in str(exc)
+    else:
+        raise AssertionError("Expected Discogs 429 retries to exhaust")
+    assert len(discogs.session.calls) == 3
+
+
+def test_discogs_duplicate_release_ids_are_fetched_once():
+    discogs = _discogs_for_test([
+        FakeResponse(200, {"results": [{"id": 7}, {"id": 7}], "pagination": {"pages": 1}}),
+        FakeResponse(200, {"id": 7, "title": "D"}),
+    ])
+
+    rows = discogs.lookup("123")
+
+    assert len(rows) == 1
+    assert [call[0] for call in discogs.session.calls].count("https://api.discogs.com/releases/7") == 1
+
+
+def test_discogs_cached_release_results_are_reused():
+    discogs = _discogs_for_test([FakeResponse(200, {"id": 7, "title": "D"})])
+
+    assert discogs.get_release(7)["id"] == 7
+    assert discogs.get_release("7")["id"] == 7
+    assert len(discogs.session.calls) == 1
+
+
+def test_bulk_successful_non_discogs_sources_still_return_when_discogs_fails(monkeypatch):
+    import pandas as pd, app
+    _patch_streamlit_progress(monkeypatch)
+    def fake_lookup(source_key, barcode, settings):
+        if source_key == "discogs":
+            raise SourceError("Discogs rate limit reached after retries; please try again later.")
+        return [{"Source": "Spotify", "Title": "ok"}]
+    monkeypatch.setattr(app, "lookup_barcode", fake_lookup)
+    monkeypatch.setitem(app.SOURCE_REGISTRY, "discogs", type("D", (), {"display_name": "Discogs"})())
+    monkeypatch.setitem(app.SOURCE_REGISTRY, "spotify", type("D", (), {"display_name": "Spotify"})())
+
+    df = run_bulk_lookup(["discogs", "spotify"], pd.DataFrame([{"UPC": "123"}]), "UPC", {})
+
+    assert list(df["Source"]) == ["Discogs", "Spotify"]
+    assert list(df["Lookup Status"]) == ["Source error", "Found"]
+
+
+def test_bulk_lookup_preserves_earlier_successful_rows_after_later_discogs_failure(monkeypatch):
+    import pandas as pd, app
+    _patch_streamlit_progress(monkeypatch)
+    def fake_lookup(source_key, barcode, settings):
+        if barcode == "222":
+            raise SourceError("Discogs rate limit reached after retries; please try again later.")
+        return [{"Source": "Discogs", "Title": "first"}]
+    monkeypatch.setattr(app, "lookup_barcode", fake_lookup)
+    monkeypatch.setitem(app.SOURCE_REGISTRY, "discogs", type("D", (), {"display_name": "Discogs"})())
+
+    df = run_bulk_lookup(["discogs"], pd.DataFrame([{"UPC": "111"}, {"UPC": "222"}]), "UPC", {})
+
+    assert list(df["Lookup Status"]) == ["Found", "Source error"]
+    assert df.iloc[0]["Title"] == "first"

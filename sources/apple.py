@@ -1,6 +1,7 @@
 from __future__ import annotations
 import os
 from dataclasses import dataclass
+import re
 from typing import Any
 from sources.base import CatalogueSource
 from sources.http import HttpClient
@@ -29,11 +30,50 @@ class AppleConnector(CatalogueSource):
             return [self._apple_row(x, barcode) for x in data.get("data") or []]
         data=self.client.get_json("https://itunes.apple.com/lookup", params=self._itunes_params(barcode))
         return [self._itunes_row(x, barcode) for x in data.get("results") or [] if x.get("wrapperType") in ("collection", None)]
+    @staticmethod
+    def _normalise_artist(value: str) -> str:
+        return re.sub(r"\s+", " ", str(value or "").strip()).casefold()
+
+    @classmethod
+    def _artist_matches(cls, searched_artist: str, returned_artist: str) -> bool:
+        needle = cls._normalise_artist(searched_artist)
+        haystack = cls._normalise_artist(returned_artist)
+        if not needle or not haystack:
+            return False
+        if needle == haystack:
+            return True
+        parts = [part.strip() for part in re.split(r"\s*(?:&|,|/|\+|;|\band\b|\bfeat\.?\b|\bfeaturing\b|\bwith\b)\s*", haystack, flags=re.IGNORECASE) if part.strip()]
+        return needle in parts
+
+    def _apple_search_url(self) -> str:
+        return f"https://api.music.apple.com/v1/catalog/{self.config.storefront}/search"
+
+    def _apple_search_params(self, lookup_type: str, value: str) -> dict[str, str]:
+        if lookup_type == "artist":
+            return {"term": value.strip(), "types": "albums", "limit": "200"}
+        if lookup_type == "title":
+            return {"term": value.strip(), "types": "albums", "limit": "200"}
+        return {}
+
+    def _itunes_search_params(self, lookup_type: str, value: str) -> dict[str, str]:
+        if lookup_type == "artist":
+            return {"term": value.strip(), "attribute": "artistTerm", "entity": "album", "limit": "200"}
+        if lookup_type == "isrc":
+            return {"term": value.strip(), "entity": "song", "limit": "200"}
+        return {"term": value.strip(), "entity": "album", "limit": "200"}
+
     def search_by_type(self, lookup_type: str, value: str) -> list[dict[str,Any]]:
-        term = value if lookup_type != "isrc" else value
-        entity = "song" if lookup_type == "isrc" else "album"
-        data=self.client.get_json("https://itunes.apple.com/search", params={"term": term, "entity": entity, "limit": "200"})
-        return [self._itunes_row(x, value) for x in data.get("results") or []]
+        if self.configured and lookup_type in {"artist", "title"}:
+            data=self.client.get_json(self._apple_search_url(), params=self._apple_search_params(lookup_type, value), headers={"Authorization": f"Bearer {self.config.developer_token}"})
+            albums = ((data.get("results") or {}).get("albums") or {}).get("data") or []
+            rows = [self._apple_row(x, value) for x in albums]
+        else:
+            params = self._itunes_search_params(lookup_type, value)
+            data=self.client.get_json("https://itunes.apple.com/search", params=params)
+            rows = [self._itunes_row(x, value) for x in data.get("results") or []]
+        if lookup_type == "artist":
+            return [row for row in rows if self._artist_matches(value, row.get("Artist", ""))]
+        return rows
     def search(self,text:str)->list[dict[str,Any]]: return []
     def get_release(self, release_id: str|int)->dict[str,Any]: return {}
     def _art(self, artwork:dict[str,Any])->tuple[str,str]:
