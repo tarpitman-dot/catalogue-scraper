@@ -1,57 +1,54 @@
 # Catalogue Scraper
 
-Catalogue Scraper is a Streamlit multi-source catalogue research platform for single barcode lookups and bulk metadata enrichment.
+Catalogue Scraper is a Streamlit multi-source catalogue research platform for single UPC/EAN lookups and bulk metadata enrichment. It keeps source results separate: there is no automatic matching, merging, confidence scoring, or deduplication.
 
-## Application sections
+## Supported sources
 
-### Search
+- **Discogs**: connected when `DISCOGS_TOKEN` is configured.
+- **MusicBrainz**: available without private credentials. Uses exact barcode searches against the official JSON web service.
+- **Cover Art Archive**: available without private credentials as MusicBrainz artwork enrichment. Missing artwork is normal and does not fail the release result.
+- **Spotify**: optional; connected when `SPOTIFY_CLIENT_ID` and `SPOTIFY_CLIENT_SECRET` are configured. Uses client-credentials auth and UPC album search.
+- **Apple Music**: optional; connected when `APPLE_MUSIC_DEVELOPER_TOKEN` is configured.
+- **iTunes Lookup**: public fallback when no Apple Music developer token is configured.
+- **Amazon**: retained in the registry as planned / awaiting credentials and intentionally disabled.
 
-- **Single Lookup**: enter one UPC/EAN and view every returned release as cards with artwork, key metadata, source links, and direct image links.
-- **Bulk Lookup**: upload Excel or CSV, select the barcode column, preserve the original columns, output one row per returned source release, and export Excel.
+## Output model
 
-### Sources
+All connectors share a small base schema for exports:
 
-The source registry is the central place for source metadata, status, credentials, and connector factories. Adding a production source should only require implementing a connector that follows the shared interface and registering it.
+`Source`, `Lookup UPC/EAN`, `Source Record ID`, `Source Record URL`, `Artist`, `Title`, `Label`, `Catalogue Number`, `Format`, `Country`, `Release Date`, `Barcode`, `Main Image URL`, `Additional Image URLs`, `Result Number`, `Results For Barcode`, `Lookup Status`, and `Error`.
 
-Current source status:
+Source-specific metadata is added in extra columns. Original uploaded columns are preserved in bulk exports. Image fields are direct URLs only; images are not downloaded or stored.
 
-- Discogs: available
-- Amazon: planned placeholder
-- MusicBrainz: planned placeholder
-- Spotify: planned placeholder
-- Apple Music: planned placeholder
-- AudioSalad: planned placeholder
+## Credentials and configuration
 
-### Settings
-
-Catalogue Scraper reads credentials from Streamlit Secrets first, then environment variables. If a configured Discogs token is present, users do not need to paste a token into the UI.
+Catalogue Scraper reads Streamlit Secrets first, then environment variables.
 
 ```toml
-DISCOGS_TOKEN = "your-token"
+DISCOGS_TOKEN = "your-discogs-token"
 
-AMAZON_CLIENT_ID = "future-value"
-AMAZON_CLIENT_SECRET = "future-value"
-AMAZON_REFRESH_TOKEN = "future-value"
-AMAZON_SELLER_ID = "future-value"
+MUSICBRAINZ_APP_NAME = "CatalogueScraper"
+MUSICBRAINZ_APP_VERSION = "2.0"
+MUSICBRAINZ_CONTACT = "you@example.com"
+
+SPOTIFY_CLIENT_ID = "your-spotify-client-id"
+SPOTIFY_CLIENT_SECRET = "your-spotify-client-secret"
+SPOTIFY_MARKET = "GB"
+
+APPLE_MUSIC_DEVELOPER_TOKEN = "your-apple-music-developer-token"
+APPLE_MUSIC_STOREFRONT = "gb"
 ```
 
-## Connector interface
+MusicBrainz requires a meaningful User-Agent. App name and version have safe defaults; set `MUSICBRAINZ_CONTACT` for best compliance.
 
-Every connector implements `CatalogueSource`:
+## Search modes
 
-- `lookup(barcode)` returns every release/product matching a UPC/EAN.
-- `search(text)` returns source results matching text.
-- `get_release(id)` returns a fully hydrated source record.
+- **Single Lookup**: select one or more configured sources, enter a UPC/EAN, view source-labelled cards, and export all returned rows to Excel.
+- **Bulk Lookup**: upload Excel or CSV, choose the barcode column, select one or more sources, and export one row per source result while preserving all original input columns.
 
-The Streamlit UI uses this interface and does not call source-specific APIs directly.
-
-## Discogs behavior
-
-Discogs lookup searches by UPC/EAN and returns one row per Discogs release returned by the API. It does not perform confidence scoring, matching, image downloads, or result filtering. Optional output fields include track listing, release notes, companies, identifiers, and video URLs. Image fields contain the main image URL and additional image URLs.
-
-## Develop and test
+## Development
 
 ```bash
 python -m pytest -q
-streamlit run app.py
+streamlit run app.py --server.headless true
 ```
