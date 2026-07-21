@@ -1,35 +1,35 @@
-# Catalogue Scraper
+# Catalogue Scraper v2
 
-Standalone Streamlit app for uploading UPC/EAN barcodes and exporting all Discogs releases returned for each barcode.
+Standalone Streamlit catalogue research and bulk enrichment app.
 
-## Features
+## Modes
 
-- Upload Excel or CSV
-- Select the barcode column
-- Fetch every Discogs release returned for each barcode
-- Produce one Excel row per Discogs release
-- Preserve the original uploaded columns
-- Export metadata and direct main/additional image URLs
-- No image downloads
-- No matching or confidence logic
+### Single Lookup
 
-## Setup
+Paste one UPC/EAN and view all returned releases as image-and-metadata cards.
 
-```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-mkdir -p .streamlit
-cp .streamlit/secrets.toml.example .streamlit/secrets.toml
-streamlit run app.py
-```
+### Bulk Lookup
 
-Add your Discogs token to `.streamlit/secrets.toml`.
+Upload Excel or CSV and export one row per returned release.
 
-## Streamlit Community Cloud
+## Current source
 
-Add this secret in the app settings:
+- Discogs
+
+## Planned sources
+
+- Amazon
+- MusicBrainz
+- Spotify
+- Apple Music
+- AudioSalad
+
+## Secrets
 
 ```toml
 DISCOGS_TOKEN = "your-token"
 ```
+
+## Deploy
+
+Replace the existing project files, preserve `.git/` and your local `.streamlit/secrets.toml`, test locally, then commit and push.

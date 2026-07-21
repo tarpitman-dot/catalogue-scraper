@@ -4,22 +4,39 @@ from typing import Any
 
 import requests
 
-
-class DiscogsError(RuntimeError):
-    pass
+from sources.base import CatalogueSource, SourceError
 
 
-class DiscogsConnector:
+class DiscogsConnector(CatalogueSource):
+    source_name = "Discogs"
     BASE_URL = "https://api.discogs.com"
 
-    def __init__(self, token: str, user_agent: str = "CatalogueScraper/0.3"):
+    def __init__(
+        self,
+        token: str,
+        per_page: int = 100,
+        max_pages: int = 10,
+        include_tracklist: bool = True,
+        include_notes: bool = False,
+        include_companies: bool = False,
+        include_identifiers: bool = True,
+        include_videos: bool = False,
+    ):
         if not token:
-            raise DiscogsError("A Discogs token is required.")
+            raise SourceError("A Discogs token is required.")
+
+        self.per_page = per_page
+        self.max_pages = max_pages
+        self.include_tracklist = include_tracklist
+        self.include_notes = include_notes
+        self.include_companies = include_companies
+        self.include_identifiers = include_identifiers
+        self.include_videos = include_videos
 
         self.session = requests.Session()
         self.session.headers.update({
             "Authorization": f"Discogs token={token}",
-            "User-Agent": user_agent,
+            "User-Agent": "CatalogueScraper/2.0",
             "Accept": "application/vnd.discogs.v2.discogs+json",
         })
 
@@ -31,11 +48,11 @@ class DiscogsConnector:
         )
 
         if response.status_code == 429:
-            raise DiscogsError("Discogs rate limit reached.")
+            raise SourceError("Discogs rate limit reached.")
         if response.status_code == 401:
-            raise DiscogsError("Discogs rejected the token.")
+            raise SourceError("Discogs rejected the token.")
         if not response.ok:
-            raise DiscogsError(
+            raise SourceError(
                 f"Discogs request failed ({response.status_code}): "
                 f"{response.text[:200]}"
             )
@@ -82,14 +99,29 @@ class DiscogsConnector:
         return " | ".join(values)
 
     @staticmethod
-    def _barcodes(release: dict[str, Any]) -> str:
-        values: list[str] = []
-        for identifier in release.get("identifiers") or []:
-            if str(identifier.get("type", "")).lower() == "barcode":
-                value = str(identifier.get("value", "")).strip()
-                if value:
-                    values.append(value)
-        return "; ".join(dict.fromkeys(values))
+    def _identifiers_text(identifiers: list[dict[str, Any]] | None) -> str:
+        values = []
+        for identifier in identifiers or []:
+            identifier_type = str(identifier.get("type", "")).strip()
+            value = str(identifier.get("value", "")).strip()
+            description = str(identifier.get("description", "")).strip()
+
+            text = f"{identifier_type}: {value}".strip(": ")
+            if description:
+                text = f"{text} ({description})"
+            if text:
+                values.append(text)
+        return " | ".join(values)
+
+    @staticmethod
+    def _companies_text(companies: list[dict[str, Any]] | None) -> str:
+        values = []
+        for company in companies or []:
+            entity_type = str(company.get("entity_type_name", "")).strip()
+            name = str(company.get("name", "")).strip()
+            if entity_type or name:
+                values.append(f"{entity_type}: {name}".strip(": "))
+        return " | ".join(values)
 
     def _release_to_row(self, release: dict[str, Any]) -> dict[str, Any]:
         labels = release.get("labels") or []
@@ -100,7 +132,7 @@ class DiscogsConnector:
             if image.get("uri") or image.get("resource_url")
         ]
 
-        return {
+        row = {
             "Discogs Release ID": release.get("id"),
             "Discogs Master ID": release.get("master_id"),
             "Discogs URL": release.get("uri"),
@@ -118,28 +150,48 @@ class DiscogsConnector:
             "Release Date": release.get("released"),
             "Genres": "; ".join(release.get("genres") or []),
             "Styles": "; ".join(release.get("styles") or []),
-            "Track Listing": self._tracklist_text(release.get("tracklist")),
-            "Discogs Barcodes": self._barcodes(release),
+            "Discogs Barcodes": "; ".join(
+                str(identifier.get("value", "")).strip()
+                for identifier in (release.get("identifiers") or [])
+                if str(identifier.get("type", "")).lower() == "barcode"
+                and str(identifier.get("value", "")).strip()
+            ),
             "Main Image URL": image_urls[0] if image_urls else "",
             "Additional Image URLs": "; ".join(image_urls[1:]),
             "Image Count": len(image_urls),
         }
 
-    def lookup_all_releases(
-        self,
-        barcode: str,
-        per_page: int = 100,
-        max_pages: int = 10,
-    ) -> list[dict[str, Any]]:
+        if self.include_tracklist:
+            row["Track Listing"] = self._tracklist_text(release.get("tracklist"))
+
+        if self.include_notes:
+            row["Release Notes"] = release.get("notes", "")
+
+        if self.include_companies:
+            row["Companies"] = self._companies_text(release.get("companies"))
+
+        if self.include_identifiers:
+            row["Identifiers"] = self._identifiers_text(release.get("identifiers"))
+
+        if self.include_videos:
+            row["Video URLs"] = "; ".join(
+                str(video.get("uri", "")).strip()
+                for video in (release.get("videos") or [])
+                if str(video.get("uri", "")).strip()
+            )
+
+        return row
+
+    def lookup_all(self, barcode: str) -> list[dict[str, Any]]:
         release_ids: list[int] = []
 
-        for page in range(1, max_pages + 1):
+        for page in range(1, self.max_pages + 1):
             search = self._get(
                 "/database/search",
                 params={
                     "barcode": barcode,
                     "type": "release",
-                    "per_page": per_page,
+                    "per_page": self.per_page,
                     "page": page,
                 },
             )
@@ -152,6 +204,7 @@ class DiscogsConnector:
 
             pagination = search.get("pagination") or {}
             total_pages = int(pagination.get("pages") or 1)
+
             if page >= total_pages or not results:
                 break
 
