@@ -8,8 +8,20 @@ BASE_COLUMNS = [
     "Lookup Status", "Error",
 ]
 
+ORCHESTRATION_COLUMNS = {
+    "Source",
+    "Lookup UPC/EAN",
+    "Result Number",
+    "Results For Barcode",
+    "Lookup Status",
+}
+
 def with_base(row: dict[str, Any], **values: Any) -> dict[str, Any]:
-    base = {column: "" for column in BASE_COLUMNS}
-    base.update(values)
+    base = {
+        column: ""
+        for column in BASE_COLUMNS
+        if column not in ORCHESTRATION_COLUMNS
+    }
     base.update(row)
+    base.update(values)
     return base

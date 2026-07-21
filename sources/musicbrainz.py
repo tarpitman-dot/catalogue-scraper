@@ -98,6 +98,8 @@ class MusicBrainzConnector(CatalogueSource):
         media = release.get("media") or []
         release_id = release.get("id", "")
         caa = self.cover_art.lookup(release_id) if release_id else {}
+        has_cover_art = int(caa.get("Image count") or 0) > 0
+        source_name = "MusicBrainz + Cover Art Archive" if has_cover_art else self.source_name
         track_listing = []
         for medium in media:
             for track in medium.get("tracks") or []:
@@ -122,5 +124,5 @@ class MusicBrainzConnector(CatalogueSource):
             "Data quality": release.get("quality", ""),
             "Tags or genres where available": _join([t.get("name") for t in (release.get("tags") or []) + (release.get("genres") or [])]),
             **caa,
-        }, Source="MusicBrainz", **{"Lookup UPC/EAN": lookup_barcode, "Source Record ID": release_id, "Source Record URL": f"https://musicbrainz.org/release/{release_id}" if release_id else "", "Artist": release.get("artist-credit-phrase") or _join([a.get("name") for a in release.get("artist-credit") or [] if isinstance(a, dict)]), "Title": release.get("title", ""), "Label": _join([(li.get("label") or {}).get("name") for li in labels]), "Catalogue Number": _join([li.get("catalog-number") for li in labels]), "Format": _join([m.get("format") for m in media]), "Country": release.get("country", ""), "Release Date": release.get("date", ""), "Barcode": release.get("barcode", "")})
+        }, Source=source_name, **{"Lookup UPC/EAN": lookup_barcode, "Source Record ID": release_id, "Source Record URL": f"https://musicbrainz.org/release/{release_id}" if release_id else "", "Artist": release.get("artist-credit-phrase") or _join([a.get("name") for a in release.get("artist-credit") or [] if isinstance(a, dict)]), "Title": release.get("title", ""), "Label": _join([(li.get("label") or {}).get("name") for li in labels]), "Catalogue Number": _join([li.get("catalog-number") for li in labels]), "Format": _join([m.get("format") for m in media]), "Country": release.get("country", ""), "Release Date": release.get("date", ""), "Barcode": release.get("barcode", "")})
         return row
