@@ -69,12 +69,23 @@ def source_name_for_record(record: dict, fallback_source_name: str) -> str:
     return str(source).strip()
 
 
+PROTECTED_LOOKUP_METADATA = {
+    "Lookup Status",
+    "Result Number",
+    "Results For Barcode",
+    "Lookup UPC/EAN",
+}
+
+
 def found_result_row(
     base_values: dict,
     record: dict,
     fallback_source_name: str,
 ) -> dict:
-    row = {**base_values, **record}
+    row = dict(record)
+    for key, value in base_values.items():
+        if key in PROTECTED_LOOKUP_METADATA or key not in row:
+            row[key] = value
     row["Source"] = source_name_for_record(record, fallback_source_name)
     return row
 

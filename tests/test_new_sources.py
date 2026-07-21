@@ -189,3 +189,62 @@ def test_multi_source_bulk_export_contains_correct_sources(monkeypatch):
 
     assert list(df["Source"]) == ["Discogs", "MusicBrainz", "Spotify"]
     app.validate_found_row_sources(df)
+
+
+def test_found_result_row_protects_lookup_metadata_from_blank_connector_fields():
+    from app import found_result_row
+
+    row = found_result_row(
+        {"Lookup UPC/EAN": "123", "Lookup Status": "Found", "Result Number": 2, "Results For Barcode": 4, "Input": "keep"},
+        {"Source": "", "Lookup UPC/EAN": "", "Lookup Status": "", "Result Number": "", "Results For Barcode": "", "Title": "Album"},
+        "Discogs",
+    )
+
+    assert row["Source"] == "Discogs"
+    assert row["Lookup UPC/EAN"] == "123"
+    assert row["Lookup Status"] == "Found"
+    assert row["Result Number"] == 2
+    assert row["Results For Barcode"] == 4
+    assert row["Input"] == "keep"
+
+
+def test_found_result_row_preserves_valid_connector_source_values():
+    from app import found_result_row
+
+    assert found_result_row({"Lookup Status": "Found"}, {"Source": "MusicBrainz + Cover Art Archive"}, "MusicBrainz")["Source"] == "MusicBrainz + Cover Art Archive"
+    assert found_result_row({"Lookup Status": "Found"}, {"Source": "iTunes Lookup"}, "Apple Music / iTunes")["Source"] == "iTunes Lookup"
+
+
+def test_with_base_does_not_add_blank_orchestration_fields_without_values():
+    from sources.schema import with_base
+
+    row = with_base({"Title": "Album"})
+
+    assert "Source" not in row
+    assert "Lookup UPC/EAN" not in row
+    assert "Lookup Status" not in row
+    assert "Result Number" not in row
+    assert "Results For Barcode" not in row
+
+
+def test_discogs_found_row_keeps_found_status_and_is_counted_and_validated(monkeypatch):
+    import pandas as pd, app
+    from sources.discogs import DiscogsConfig, DiscogsConnector
+
+    _patch_streamlit_progress(monkeypatch)
+    discogs = DiscogsConnector.__new__(DiscogsConnector)
+    discogs.config = DiscogsConfig("token")
+    discogs.include_tracklist = discogs.include_notes = discogs.include_companies = discogs.include_videos = False
+    discogs.include_identifiers = True
+    record = discogs._release_to_row({"id": 7, "uri": "https://discogs.test/release/7", "title": "D"}, "123")
+    record.update({"Lookup Status": "", "Result Number": "", "Results For Barcode": ""})
+
+    monkeypatch.setattr(app, "lookup_barcode", lambda source_key, barcode, settings: [record])
+    monkeypatch.setitem(app.SOURCE_REGISTRY, "discogs", type("D", (), {"display_name": "Discogs"})())
+
+    df = run_bulk_lookup(["discogs"], pd.DataFrame([{"UPC": "123"}]), "UPC", {})
+
+    assert df.iloc[0]["Source"] == "Discogs"
+    assert df.iloc[0]["Lookup Status"] == "Found"
+    assert int((df["Lookup Status"] == "Found").sum()) == 1
+    app.validate_found_row_sources(df)
