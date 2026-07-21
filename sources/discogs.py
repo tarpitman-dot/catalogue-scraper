@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
 import requests
@@ -7,35 +8,51 @@ import requests
 from sources.base import CatalogueSource, SourceError
 
 
+@dataclass(frozen=True)
+class DiscogsConfig:
+    token: str
+    per_page: int = 100
+    max_pages: int = 10
+    include_tracklist: bool = True
+    include_notes: bool = False
+    include_companies: bool = False
+    include_identifiers: bool = True
+    include_videos: bool = False
+
+    @classmethod
+    def from_settings(cls, settings: dict[str, Any]) -> "DiscogsConfig":
+        return cls(
+            token=str(settings.get("token", "") or ""),
+            per_page=int(settings.get("per_page", 100) or 100),
+            max_pages=int(settings.get("max_pages", 10) or 10),
+            include_tracklist=bool(settings.get("include_tracklist", True)),
+            include_notes=bool(settings.get("include_notes", False)),
+            include_companies=bool(settings.get("include_companies", False)),
+            include_identifiers=bool(settings.get("include_identifiers", True)),
+            include_videos=bool(settings.get("include_videos", False)),
+        )
+
+
 class DiscogsConnector(CatalogueSource):
     source_name = "Discogs"
     BASE_URL = "https://api.discogs.com"
 
-    def __init__(
-        self,
-        token: str,
-        per_page: int = 100,
-        max_pages: int = 10,
-        include_tracklist: bool = True,
-        include_notes: bool = False,
-        include_companies: bool = False,
-        include_identifiers: bool = True,
-        include_videos: bool = False,
-    ):
-        if not token:
+    def __init__(self, config: DiscogsConfig):
+        if not config.token:
             raise SourceError("A Discogs token is required.")
 
-        self.per_page = per_page
-        self.max_pages = max_pages
-        self.include_tracklist = include_tracklist
-        self.include_notes = include_notes
-        self.include_companies = include_companies
-        self.include_identifiers = include_identifiers
-        self.include_videos = include_videos
+        self.config = config
+        self.per_page = config.per_page
+        self.max_pages = config.max_pages
+        self.include_tracklist = config.include_tracklist
+        self.include_notes = config.include_notes
+        self.include_companies = config.include_companies
+        self.include_identifiers = config.include_identifiers
+        self.include_videos = config.include_videos
 
         self.session = requests.Session()
         self.session.headers.update({
-            "Authorization": f"Discogs token={token}",
+            "Authorization": f"Discogs token={config.token}",
             "User-Agent": "CatalogueScraper/2.0",
             "Accept": "application/vnd.discogs.v2.discogs+json",
         })
@@ -182,7 +199,17 @@ class DiscogsConnector(CatalogueSource):
 
         return row
 
-    def lookup_all(self, barcode: str) -> list[dict[str, Any]]:
+    def get_release(self, release_id: str | int) -> dict[str, Any]:
+        return self._get(f"/releases/{release_id}")
+
+    def search(self, text: str) -> list[dict[str, Any]]:
+        search = self._get(
+            "/database/search",
+            params={"q": text, "type": "release", "per_page": self.per_page},
+        )
+        return [dict(result) for result in (search.get("results") or [])]
+
+    def lookup(self, barcode: str) -> list[dict[str, Any]]:
         release_ids: list[int] = []
 
         for page in range(1, self.max_pages + 1):
@@ -199,7 +226,7 @@ class DiscogsConnector(CatalogueSource):
             results = search.get("results") or []
             for result in results:
                 release_id = result.get("id")
-                if release_id and release_id not in release_ids:
+                if release_id:
                     release_ids.append(release_id)
 
             pagination = search.get("pagination") or {}
@@ -210,7 +237,7 @@ class DiscogsConnector(CatalogueSource):
 
         rows: list[dict[str, Any]] = []
         for release_id in release_ids:
-            release = self._get(f"/releases/{release_id}")
+            release = self.get_release(release_id)
             rows.append(self._release_to_row(release))
 
         return rows

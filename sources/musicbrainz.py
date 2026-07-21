@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-from sources.base import CatalogueSource
+from sources.placeholders import PlaceholderConnector
 
 
-class MusicBrainzConnector(CatalogueSource):
-    source_name = "MusicBrainz"
-
-    def lookup_all(self, barcode: str):
-        raise NotImplementedError
+class MusicBrainzConnector(PlaceholderConnector):
+    def __init__(self) -> None:
+        super().__init__("MusicBrainz")

@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-from sources.base import CatalogueSource
+from sources.placeholders import PlaceholderConnector
 
 
-class AmazonConnector(CatalogueSource):
-    source_name = "Amazon"
-
-    def lookup_all(self, barcode: str):
-        raise NotImplementedError
+class AmazonConnector(PlaceholderConnector):
+    def __init__(self) -> None:
+        super().__init__("Amazon")
