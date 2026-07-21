@@ -15,6 +15,7 @@ class SpotifyConfig:
 
 class SpotifyConnector(CatalogueSource):
     source_name = "Spotify"
+    supported_lookup_types = {"barcode", "isrc", "artist", "title"}
     def __init__(self, config: SpotifyConfig | None = None, client: HttpClient | None = None):
         self.config = config or SpotifyConfig.from_settings({}); self.client = client or HttpClient("Spotify", "CatalogueScraper/2.0")
         self._token = ""; self._token_expiry = 0.0
@@ -27,12 +28,32 @@ class SpotifyConnector(CatalogueSource):
         self._token = data.get("access_token", ""); self._token_expiry = time.time() + int(data.get("expires_in") or 3600)
         return self._token
     def _search_params(self, barcode: str) -> dict[str, str]: return {"q": f"upc:{barcode}", "type": "album", "market": self.config.market, "limit": "50"}
+    def _search_params_for_type(self, lookup_type: str, value: str) -> dict[str, str]:
+        if lookup_type == "isrc": return {"q": f"isrc:{value}", "type": "track", "market": self.config.market, "limit": "50"}
+        if lookup_type == "artist": return {"q": f"artist:{value}", "type": "artist", "market": self.config.market, "limit": "50"}
+        if lookup_type == "title": return {"q": f"album:{value}", "type": "album", "market": self.config.market, "limit": "50"}
+        return self._search_params(value)
     def lookup(self, barcode: str) -> list[dict[str, Any]]:
         token = self._ensure_token(); data = self.client.get_json("https://api.spotify.com/v1/search", params=self._search_params(barcode), headers={"Authorization": f"Bearer {token}"})
         return [self._album_to_row(a, barcode) for a in ((data.get("albums") or {}).get("items") or [])]
+    def search_by_type(self, lookup_type: str, value: str) -> list[dict[str, Any]]:
+        token = self._ensure_token(); data = self.client.get_json("https://api.spotify.com/v1/search", params=self._search_params_for_type(lookup_type, value), headers={"Authorization": f"Bearer {token}"})
+        if lookup_type == "isrc": return [self._track_to_row(t, value) for t in ((data.get("tracks") or {}).get("items") or [])]
+        if lookup_type == "artist": return [self._artist_to_row(a) for a in ((data.get("artists") or {}).get("items") or [])]
+        return [self._album_to_row(a, value) for a in ((data.get("albums") or {}).get("items") or [])]
     def search(self, text: str) -> list[dict[str, Any]]: return []
     def get_release(self, release_id: str | int) -> dict[str, Any]:
         return self.client.get_json(f"https://api.spotify.com/v1/albums/{release_id}", headers={"Authorization": f"Bearer {self._ensure_token()}"})
     def _album_to_row(self, a: dict[str, Any], barcode: str) -> dict[str, Any]:
         imgs=a.get("images") or []; ext=a.get("external_ids") or {}; url=(a.get("external_urls") or {}).get("spotify", "")
-        return with_base({"Spotify Album ID": a.get("id",""), "Spotify URI": a.get("uri",""), "Spotify URL": url, "UPC": ext.get("upc", barcode), "Album type": a.get("album_type",""), "Release date precision": a.get("release_date_precision",""), "Total tracks": a.get("total_tracks",""), "Copyrights": "; ".join(c.get("text","") for c in a.get("copyrights") or []), "Genres where available": "; ".join(a.get("genres") or []), "Available markets where available": "; ".join(a.get("available_markets") or []), "Popularity where available": a.get("popularity", ""), "Image dimensions": "; ".join(f"{i.get('width')}x{i.get('height')}" for i in imgs), "Track listing": " | ".join(t.get("name","") for t in ((a.get("tracks") or {}).get("items") or [])), "External identifiers": str(ext)}, Source="Spotify", **{"Lookup UPC/EAN": barcode, "Source Record ID": a.get("id",""), "Source Record URL": url, "Artist": "; ".join(x.get("name","") for x in a.get("artists") or []), "Title": a.get("name",""), "Label": a.get("label",""), "Release Date": a.get("release_date",""), "Barcode": ext.get("upc", barcode), "Main Image URL": imgs[0].get("url","") if imgs else "", "Additional Image URLs": "; ".join(i.get("url","") for i in imgs[1:])})
+        return with_base({"Spotify Album ID": a.get("id",""), "Spotify URI": a.get("uri",""), "Spotify URL": url, "UPC": ext.get("upc", barcode), "Album type": a.get("album_type",""), "Release date precision": a.get("release_date_precision",""), "Total tracks": a.get("total_tracks",""), "Copyrights": "; ".join(c.get("text","") for c in a.get("copyrights") or []), "Genres where available": "; ".join(a.get("genres") or []), "Available markets where available": "; ".join(a.get("available_markets") or []), "Popularity where available": a.get("popularity", ""), "Image dimensions": "; ".join(f"{i.get('width')}x{i.get('height')}" for i in imgs), "Track listing": " | ".join(t.get("name","") for t in ((a.get("tracks") or {}).get("items") or [])), "External identifiers": str(ext)}, Source="Spotify", **{"Lookup UPC/EAN": barcode, "Source Record ID": a.get("id",""), "Source Record URL": url, "Artist": "; ".join(x.get("name","") for x in a.get("artists") or []), "Title": a.get("name",""), "Label": a.get("label",""), "Release Date": a.get("release_date",""), "Barcode": ext.get("upc", barcode), "Main Image URL": imgs[0].get("url","") if imgs else "", "Additional Image URLs": "; ".join(i.get("url","") for i in imgs[1:]), "Result Entity Type": "Release"})
+
+def _spotify_track_to_row(self, t: dict[str, Any], isrc: str) -> dict[str, Any]:
+    url=(t.get("external_urls") or {}).get("spotify", ""); ext=t.get("external_ids") or {}; album=t.get("album") or {}; imgs=album.get("images") or []
+    return with_base({"Spotify Track ID": t.get("id", "")}, Source="Spotify", **{"Result Entity Type": "Track", "Source Record ID": t.get("id", ""), "Source Record URL": url, "Artist": "; ".join(x.get("name", "") for x in t.get("artists") or []), "Title": t.get("name", ""), "ISRC": ext.get("isrc", isrc), "Main Image URL": imgs[0].get("url", "") if imgs else ""})
+
+def _spotify_artist_to_row(self, a: dict[str, Any]) -> dict[str, Any]:
+    url=(a.get("external_urls") or {}).get("spotify", ""); imgs=a.get("images") or []
+    return with_base({"Spotify Artist ID": a.get("id", "")}, Source="Spotify", **{"Result Entity Type": "Artist", "Source Record ID": a.get("id", ""), "Source Record URL": url, "Artist": a.get("name", ""), "Main Image URL": imgs[0].get("url", "") if imgs else ""})
+SpotifyConnector._track_to_row = _spotify_track_to_row
+SpotifyConnector._artist_to_row = _spotify_artist_to_row

@@ -3,6 +3,8 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Any
 
+from sources.lookup import LookupStatus
+
 
 class SourceError(RuntimeError):
     """Raised when a catalogue source cannot complete a request."""
@@ -17,6 +19,20 @@ class CatalogueSource(ABC):
     """
 
     source_name: str
+    supported_lookup_types: set[str] = {"barcode"}
+
+    def supports_lookup_type(self, lookup_type: str) -> bool:
+        return lookup_type in self.supported_lookup_types
+
+    def lookup_by_type(self, lookup_type: str, value: str) -> list[dict[str, Any]]:
+        if not self.supports_lookup_type(lookup_type):
+            return []
+        if lookup_type == "barcode":
+            return self.lookup(value)
+        return self.search_by_type(lookup_type, value)
+
+    def search_by_type(self, lookup_type: str, value: str) -> list[dict[str, Any]]:
+        raise SourceError(f"{self.source_name} does not support {lookup_type} lookup.")
 
     @abstractmethod
     def lookup(self, barcode: str) -> list[dict[str, Any]]:

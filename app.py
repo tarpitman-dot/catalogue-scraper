@@ -10,17 +10,14 @@ import streamlit as st
 
 from sources.base import SourceError
 from sources.registry import SOURCE_REGISTRY
+from sources.lookup import LOOKUP_TYPES, LookupStatus, lookup_type_label, normalise_lookup_value
 
 
 APP_NAME = "Catalogue Scraper"
 
 
 def normalise_barcode(value: object) -> str:
-    if pd.isna(value):
-        return ""
-    text = str(value).strip()
-    text = re.sub(r"\.0$", "", text)
-    return re.sub(r"\D", "", text)
+    return normalise_lookup_value("barcode", value)[0]
 
 
 def read_input(uploaded_file) -> pd.DataFrame:
@@ -32,6 +29,34 @@ def read_input(uploaded_file) -> pd.DataFrame:
     raise ValueError("Please upload an Excel or CSV file.")
 
 
+def safe_source_filename(source_name: str) -> str:
+    safe = re.sub(r"[^A-Za-z0-9]+", "_", str(source_name).strip().lower()).strip("_")
+    return safe or "source"
+
+
+def result_sources_with_rows(df: pd.DataFrame) -> list[str]:
+    if df.empty or "Source" not in df.columns:
+        return []
+    return [str(source) for source in df["Source"].dropna().astype(str).unique() if source.strip()]
+
+
+def source_specific_results(df: pd.DataFrame, source_name: str) -> pd.DataFrame:
+    if df.empty or "Source" not in df.columns:
+        return df.iloc[0:0].copy()
+    return df[df["Source"].astype(str) == source_name].copy()
+
+
+def render_download_buttons(df: pd.DataFrame, prefix: str = "catalogue_scraper") -> None:
+    if df.empty:
+        return
+    st.download_button("Download All Results", data=excel_bytes(df), file_name=f"{prefix}_all_results.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    for source_name in result_sources_with_rows(df):
+        source_df = source_specific_results(df, source_name)
+        if source_df.empty:
+            continue
+        st.download_button(f"Download {source_name} Results", data=excel_bytes(source_df), file_name=f"{prefix}_{safe_source_filename(source_name)}_results.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+
 def excel_bytes(df: pd.DataFrame) -> bytes:
     validate_found_row_sources(df)
     output = io.BytesIO()
@@ -39,7 +64,7 @@ def excel_bytes(df: pd.DataFrame) -> bytes:
         df.to_excel(writer, index=False, sheet_name="Catalogue Results")
 
         if "Lookup Status" in df.columns:
-            errors = df[df["Lookup Status"].isin(["Error", "Invalid barcode"])]
+            errors = df[df["Lookup Status"].isin([LookupStatus.ERROR, LookupStatus.INVALID, "Error", "Invalid barcode", LookupStatus.NOT_CONFIGURED])]
             no_results = df[df["Lookup Status"] == "No results"]
 
             if not errors.empty:
@@ -73,6 +98,10 @@ PROTECTED_LOOKUP_METADATA = {
     "Lookup Status",
     "Result Number",
     "Results For Barcode",
+    "Results For Search",
+    "Search Type",
+    "Search Value",
+    "Result Entity Type",
     "Lookup UPC/EAN",
 }
 
@@ -200,20 +229,37 @@ def create_source_connector(source_key: str, settings: dict):
     return definition.create_connector(settings)
 
 
-def lookup_barcode(source_key: str, barcode: str, settings: dict) -> list[dict]:
-    cache_key = (source_key, barcode, tuple(sorted((settings or {}).items())))
+
+def source_supports_lookup(source_key: str, lookup_type: str) -> bool:
+    return lookup_type in getattr(SOURCE_REGISTRY[source_key], "supported_lookup_types", frozenset({"barcode"}))
+
+def show_lookup_support(source_keys: list[str], lookup_type: str) -> None:
+    supported = [SOURCE_REGISTRY[k].display_name for k in source_keys if source_supports_lookup(k, lookup_type)]
+    unsupported = [SOURCE_REGISTRY[k].display_name for k in source_keys if not source_supports_lookup(k, lookup_type)]
+    if supported:
+        st.caption("Supports selected lookup: " + ", ".join(supported))
+    if unsupported:
+        st.caption("Skipped for selected lookup: " + ", ".join(unsupported))
+
+def lookup_by_type(source_key: str, lookup_type: str, value: str, settings: dict) -> list[dict]:
+    cache_key = (source_key, lookup_type, value, tuple(sorted((settings or {}).items())))
     cache = st.session_state.setdefault("lookup_cache", {})
     if cache_key not in cache:
         connector = create_source_connector(source_key, settings)
-        cache[cache_key] = connector.lookup(barcode=barcode)
+        cache[cache_key] = connector.lookup_by_type(lookup_type, value)
     return cache[cache_key]
+
+
+def lookup_barcode(source_key: str, barcode: str, settings: dict) -> list[dict]:
+    return lookup_by_type(source_key, "barcode", barcode, settings)
 
 
 def run_bulk_lookup(
     source_keys: list[str],
     source_df: pd.DataFrame,
-    barcode_column: str,
+    value_column: str,
     settings_by_source: dict[str, dict],
+    lookup_type: str = "barcode",
 ) -> pd.DataFrame:
 
     output_rows: list[dict] = []
@@ -222,38 +268,44 @@ def run_bulk_lookup(
     status = st.empty()
 
     for idx, (_, original_row) in enumerate(source_df.iterrows(), start=1):
-        barcode = normalise_barcode(original_row.get(barcode_column, ""))
-        status.write(f"Processing {idx} of {total}: {barcode or 'blank barcode'}")
+        search_value, validation_error = normalise_lookup_value(lookup_type, original_row.get(value_column, ""))
+        status.write(f"Processing {idx} of {total}: {search_value or 'blank search value'}")
 
         input_data = original_row.to_dict()
-        input_data["Lookup UPC/EAN"] = barcode
-        if not barcode:
+        input_data["Search Type"] = lookup_type_label(lookup_type)
+        input_data["Search Value"] = search_value
+        input_data["Lookup UPC/EAN"] = search_value if lookup_type == "barcode" else ""
+        if validation_error:
             output_rows.append({
                 **input_data,
-                "Lookup Status": "Invalid barcode",
+                "Lookup Status": LookupStatus.INVALID,
                 "Result Number": "",
                 "Results For Barcode": 0,
-                "Error": "Blank or invalid UPC/EAN",
+                "Results For Search": 0,
+                "Error": validation_error,
             })
             progress.progress(idx / total)
             continue
 
         for source_key in source_keys:
             source_definition = SOURCE_REGISTRY[source_key]
+            if not source_supports_lookup(source_key, lookup_type):
+                output_rows.append({**input_data, "Source": source_definition.display_name, "Lookup Status": LookupStatus.UNSUPPORTED, "Result Number": "", "Results For Barcode": 0, "Results For Search": 0})
+                continue
             try:
-                records = lookup_barcode(source_key, barcode, settings_by_source.get(source_key, {}))
+                records = (lookup_barcode(source_key, search_value, settings_by_source.get(source_key, {})) if lookup_type == "barcode" else lookup_by_type(source_key, lookup_type, search_value, settings_by_source.get(source_key, {})))
                 if not records:
-                    output_rows.append({**input_data, "Source": source_definition.display_name, "Lookup Status": "No results", "Result Number": "", "Results For Barcode": 0})
+                    output_rows.append({**input_data, "Source": source_definition.display_name, "Lookup Status": LookupStatus.NO_RESULTS, "Result Number": "", "Results For Barcode": 0, "Results For Search": 0})
                 else:
                     total_results = len(records)
                     for result_number, record in enumerate(records, start=1):
                         output_rows.append(found_result_row(
-                            {**input_data, "Lookup Status": "Found", "Result Number": result_number, "Results For Barcode": total_results},
+                            {**input_data, "Lookup Status": LookupStatus.FOUND, "Result Number": result_number, "Results For Barcode": total_results, "Results For Search": total_results, "Search Type": lookup_type_label(lookup_type), "Search Value": search_value},
                             record,
                             source_definition.display_name,
                         ))
             except SourceError as exc:
-                output_rows.append({**input_data, "Source": source_definition.display_name, "Lookup Status": "Error", "Result Number": "", "Results For Barcode": 0, "Error": str(exc)})
+                output_rows.append({**input_data, "Source": source_definition.display_name, "Lookup Status": LookupStatus.ERROR, "Result Number": "", "Results For Barcode": 0, "Results For Search": 0, "Error": str(exc)})
 
         progress.progress(idx / total)
 
@@ -335,36 +387,47 @@ with search_tab:
     if mode == "Single Lookup":
         st.subheader("Single Lookup")
 
-        barcode_input = st.text_input(
-            "UPC / EAN",
-            placeholder="Paste one barcode",
+        lookup_type = st.selectbox(
+            "Lookup type",
+            options=list(LOOKUP_TYPES),
+            format_func=lookup_type_label,
+            key="single_lookup_type",
         )
+        show_lookup_support(selected_sources, lookup_type)
+
+        search_input = st.text_input(
+            lookup_type_label(lookup_type),
+            placeholder="Paste one lookup value",
+        )
+        search_value, validation_error = normalise_lookup_value(lookup_type, search_input)
 
         if st.button(
             "Search catalogue",
             type="primary",
-            disabled=not bool(normalise_barcode(barcode_input)),
+            disabled=bool(validation_error),
         ):
-            barcode = normalise_barcode(barcode_input)
-
-            try:
-                all_rows = []
-                for source_key in selected_sources:
-                    try:
-                        records = lookup_barcode(source_key, barcode, settings_by_source.get(source_key, {}))
-                        for n, record in enumerate(records, start=1):
-                            all_rows.append(found_result_row(
-                                {"Lookup UPC/EAN": barcode, "Lookup Status": "Found", "Result Number": n, "Results For Barcode": len(records)},
-                                record,
-                                SOURCE_REGISTRY[source_key].display_name,
-                            ))
-                    except SourceError as exc:
-                        all_rows.append({"Lookup UPC/EAN": barcode, "Source": SOURCE_REGISTRY[source_key].display_name, "Lookup Status": "Error", "Error": str(exc)})
-                single_results = pd.DataFrame(all_rows)
-                validate_found_row_sources(single_results)
-                st.session_state["single_results"] = single_results
-            except SourceError as exc:
-                st.error(str(exc))
+            all_rows = []
+            for source_key in selected_sources:
+                source_definition = SOURCE_REGISTRY[source_key]
+                base = {"Search Type": lookup_type_label(lookup_type), "Search Value": search_value, "Lookup UPC/EAN": search_value if lookup_type == "barcode" else ""}
+                if not source_supports_lookup(source_key, lookup_type):
+                    all_rows.append({**base, "Source": source_definition.display_name, "Lookup Status": LookupStatus.UNSUPPORTED, "Result Number": "", "Results For Search": 0})
+                    continue
+                try:
+                    records = (lookup_barcode(source_key, search_value, settings_by_source.get(source_key, {})) if lookup_type == "barcode" else lookup_by_type(source_key, lookup_type, search_value, settings_by_source.get(source_key, {})))
+                    if not records:
+                        all_rows.append({**base, "Source": source_definition.display_name, "Lookup Status": LookupStatus.NO_RESULTS, "Result Number": "", "Results For Search": 0})
+                    for n, record in enumerate(records, start=1):
+                        all_rows.append(found_result_row(
+                            {**base, "Lookup Status": LookupStatus.FOUND, "Result Number": n, "Results For Search": len(records), "Results For Barcode": len(records)},
+                            record,
+                            source_definition.display_name,
+                        ))
+                except SourceError as exc:
+                    all_rows.append({**base, "Source": source_definition.display_name, "Lookup Status": LookupStatus.ERROR, "Result Number": "", "Results For Search": 0, "Error": str(exc)})
+            single_results = pd.DataFrame(all_rows)
+            validate_found_row_sources(single_results)
+            st.session_state["single_results"] = single_results
 
         if "single_results" in st.session_state:
             single_df = st.session_state["single_results"]
@@ -376,18 +439,21 @@ with search_tab:
                 with st.expander("View as table"):
                     st.dataframe(single_df, use_container_width=True, hide_index=True)
 
-                st.download_button(
-                    "Download single lookup Excel",
-                    data=excel_bytes(single_df),
-                    file_name="catalogue_scraper_single_lookup.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                )
+                render_download_buttons(single_df)
 
     else:
         st.subheader("Bulk Lookup")
 
+        bulk_lookup_type = st.selectbox(
+            "Lookup type",
+            options=list(LOOKUP_TYPES),
+            format_func=lookup_type_label,
+            key="bulk_lookup_type",
+        )
+        show_lookup_support(selected_sources, bulk_lookup_type)
+
         uploaded = st.file_uploader(
-            "Upload an Excel or CSV file containing UPCs/EANs",
+            "Upload an Excel or CSV file containing lookup values",
             type=["xlsx", "xls", "csv"],
         )
 
@@ -402,13 +468,13 @@ with search_tab:
                 st.warning("The uploaded file contains no rows.")
             else:
                 barcode_column = st.selectbox(
-                    "Which column contains the UPC/EAN?",
+                    "Which column contains the selected lookup value?",
                     options=list(source_df.columns),
                     index=0,
                 )
 
                 preview = source_df.copy()
-                preview["_Cleaned UPC/EAN"] = preview[barcode_column].map(normalise_barcode)
+                preview["_Normalised Search Value"] = preview[barcode_column].map(lambda value: normalise_lookup_value(bulk_lookup_type, value)[0])
                 st.dataframe(preview.head(50), use_container_width=True, hide_index=True)
 
                 if st.button("Run bulk lookup", type="primary"):
@@ -417,6 +483,7 @@ with search_tab:
                         source_df,
                         barcode_column,
                         settings_by_source,
+                        bulk_lookup_type,
                     )
                     st.session_state["bulk_results"] = results_df
 
@@ -439,12 +506,7 @@ with search_tab:
             c2.metric("Barcodes with results", unique_barcodes)
             c3.metric("Barcodes with no results", no_results)
 
-            st.download_button(
-                "Download bulk Excel",
-                data=excel_bytes(results_df),
-                file_name="catalogue_scraper_bulk_results.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            )
+            render_download_buttons(results_df)
 
 with sources_tab:
     st.subheader("Sources")
