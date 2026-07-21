@@ -36,6 +36,7 @@ class DiscogsConfig:
 
 class DiscogsConnector(CatalogueSource):
     source_name = "Discogs"
+    supported_lookup_types = {"barcode", "catalogue_number", "label", "artist", "title"}
     BASE_URL = "https://api.discogs.com"
 
     def __init__(self, config: DiscogsConfig):
@@ -202,6 +203,7 @@ class DiscogsConnector(CatalogueSource):
             row,
             Source=self.source_name,
             **{
+                "Result Entity Type": "Release",
                 "Lookup UPC/EAN": lookup_barcode,
                 "Source Record ID": release.get("id", ""),
                 "Source Record URL": release.get("uri", ""),
@@ -219,14 +221,14 @@ class DiscogsConnector(CatalogueSource):
         )
         return [dict(result) for result in (search.get("results") or [])]
 
-    def lookup(self, barcode: str) -> list[dict[str, Any]]:
+    def _database_search_rows(self, params: dict[str, Any], lookup_value: str = "") -> list[dict[str, Any]]:
         release_ids: list[int] = []
 
         for page in range(1, self.max_pages + 1):
             search = self._get(
                 "/database/search",
                 params={
-                    "barcode": barcode,
+                    **params,
                     "type": "release",
                     "per_page": self.per_page,
                     "page": page,
@@ -248,6 +250,21 @@ class DiscogsConnector(CatalogueSource):
         rows: list[dict[str, Any]] = []
         for release_id in release_ids:
             release = self.get_release(release_id)
-            rows.append(self._release_to_row(release, barcode))
+            rows.append(self._release_to_row(release, lookup_value))
 
         return rows
+
+    def _search_params_for_type(self, lookup_type: str, value: str) -> dict[str, Any]:
+        return {
+            "barcode": {"barcode": value},
+            "catalogue_number": {"catno": value},
+            "label": {"label": value},
+            "artist": {"artist": value},
+            "title": {"release_title": value},
+        }[lookup_type]
+
+    def search_by_type(self, lookup_type: str, value: str) -> list[dict[str, Any]]:
+        return self._database_search_rows(self._search_params_for_type(lookup_type, value), value)
+
+    def lookup(self, barcode: str) -> list[dict[str, Any]]:
+        return self._database_search_rows({"barcode": barcode}, barcode)

@@ -2,18 +2,16 @@ from __future__ import annotations
 from typing import Any
 
 BASE_COLUMNS = [
-    "Source", "Lookup UPC/EAN", "Source Record ID", "Source Record URL", "Artist", "Title",
-    "Label", "Catalogue Number", "Format", "Country", "Release Date", "Barcode",
-    "Main Image URL", "Additional Image URLs", "Result Number", "Results For Barcode",
-    "Lookup Status", "Error",
+    "Search Type", "Search Value", "Source", "Result Entity Type", "Lookup Status",
+    "Result Number", "Results For Search", "Source Record ID", "Source Record URL",
+    "Artist", "Title", "Label", "Catalogue Number", "Barcode", "ISRC", "Format",
+    "Country", "Release Date", "Main Image URL", "Additional Image URLs", "Error",
+    "Lookup UPC/EAN", "Results For Barcode",
 ]
 
 ORCHESTRATION_COLUMNS = {
-    "Source",
-    "Lookup UPC/EAN",
-    "Result Number",
-    "Results For Barcode",
-    "Lookup Status",
+    "Search Type", "Search Value", "Source", "Result Entity Type", "Lookup Status",
+    "Result Number", "Results For Search", "Lookup UPC/EAN", "Results For Barcode",
 }
 
 def with_base(row: dict[str, Any], **values: Any) -> dict[str, Any]:

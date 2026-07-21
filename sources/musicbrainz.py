@@ -67,6 +67,7 @@ class CoverArtArchiveClient:
 
 class MusicBrainzConnector(CatalogueSource):
     source_name = "MusicBrainz"
+    supported_lookup_types = {"barcode", "catalogue_number", "isrc", "label", "artist", "title"}
     BASE_URL = "https://musicbrainz.org/ws/2"
 
     def __init__(self, config: MusicBrainzConfig | None = None, client: HttpClient | None = None, cover_art: CoverArtArchiveClient | None = None):
@@ -80,11 +81,21 @@ class MusicBrainzConnector(CatalogueSource):
         return {"query": f'barcode:"{barcode}"', "fmt": "json", "limit": "100"}
 
     def lookup(self, barcode: str) -> list[dict[str, Any]]:
-        data = self.client.get_json(f"{self.BASE_URL}/release", params=self._params(barcode))
-        rows = []
-        for release in data.get("releases") or []:
-            rows.append(self._release_to_row(release, barcode))
-        return rows
+        return self.search_by_type("barcode", barcode)
+
+    def search_by_type(self, lookup_type: str, value: str) -> list[dict[str, Any]]:
+        if lookup_type == "isrc":
+            data = self.client.get_json(f"{self.BASE_URL}/recording", params={"query": f'isrc:"{value}"', "fmt": "json", "limit": "100"})
+            return [self._recording_to_row(r, value) for r in data.get("recordings") or []]
+        if lookup_type == "label":
+            data = self.client.get_json(f"{self.BASE_URL}/label", params={"query": f'label:"{value}"', "fmt": "json", "limit": "100"})
+            return [self._label_to_row(r) for r in data.get("labels") or []]
+        if lookup_type == "artist":
+            data = self.client.get_json(f"{self.BASE_URL}/artist", params={"query": f'artist:"{value}"', "fmt": "json", "limit": "100"})
+            return [self._artist_to_row(r) for r in data.get("artists") or []]
+        queries = {"barcode": f'barcode:"{value}"', "catalogue_number": f'catno:"{value}"', "title": f'release:"{value}"'}
+        data = self.client.get_json(f"{self.BASE_URL}/release", params={"query": queries[lookup_type], "fmt": "json", "limit": "100"})
+        return [self._release_to_row(release, value) for release in data.get("releases") or []]
 
     def search(self, text: str) -> list[dict[str, Any]]:
         return self.client.get_json(f"{self.BASE_URL}/release", params={"query": text, "fmt": "json", "limit": "100"}).get("releases", [])
@@ -124,5 +135,23 @@ class MusicBrainzConnector(CatalogueSource):
             "Data quality": release.get("quality", ""),
             "Tags or genres where available": _join([t.get("name") for t in (release.get("tags") or []) + (release.get("genres") or [])]),
             **caa,
-        }, Source=source_name, **{"Lookup UPC/EAN": lookup_barcode, "Source Record ID": release_id, "Source Record URL": f"https://musicbrainz.org/release/{release_id}" if release_id else "", "Artist": release.get("artist-credit-phrase") or _join([a.get("name") for a in release.get("artist-credit") or [] if isinstance(a, dict)]), "Title": release.get("title", ""), "Label": _join([(li.get("label") or {}).get("name") for li in labels]), "Catalogue Number": _join([li.get("catalog-number") for li in labels]), "Format": _join([m.get("format") for m in media]), "Country": release.get("country", ""), "Release Date": release.get("date", ""), "Barcode": release.get("barcode", "")})
+        }, Source=source_name, **{"Lookup UPC/EAN": lookup_barcode, "Source Record ID": release_id, "Source Record URL": f"https://musicbrainz.org/release/{release_id}" if release_id else "", "Artist": release.get("artist-credit-phrase") or _join([a.get("name") for a in release.get("artist-credit") or [] if isinstance(a, dict)]), "Title": release.get("title", ""), "Label": _join([(li.get("label") or {}).get("name") for li in labels]), "Catalogue Number": _join([li.get("catalog-number") for li in labels]), "Format": _join([m.get("format") for m in media]), "Country": release.get("country", ""), "Release Date": release.get("date", ""), "Barcode": release.get("barcode", ""), "Result Entity Type": "Release"})
         return row
+
+
+# entity row helpers attached for tests and lookup orchestration
+def _mb_recording_to_row(self, recording: dict[str, Any], isrc: str) -> dict[str, Any]:
+    rid = recording.get("id", "")
+    return with_base({}, Source=self.source_name, **{"Result Entity Type": "Recording", "Source Record ID": rid, "Source Record URL": f"https://musicbrainz.org/recording/{rid}" if rid else "", "Artist": recording.get("artist-credit-phrase", ""), "Title": recording.get("title", ""), "ISRC": isrc})
+
+def _mb_label_to_row(self, label: dict[str, Any]) -> dict[str, Any]:
+    lid = label.get("id", "")
+    return with_base({}, Source=self.source_name, **{"Result Entity Type": "Label", "Source Record ID": lid, "Source Record URL": f"https://musicbrainz.org/label/{lid}" if lid else "", "Label": label.get("name", ""), "Country": label.get("country", "")})
+
+def _mb_artist_to_row(self, artist: dict[str, Any]) -> dict[str, Any]:
+    aid = artist.get("id", "")
+    return with_base({}, Source=self.source_name, **{"Result Entity Type": "Artist", "Source Record ID": aid, "Source Record URL": f"https://musicbrainz.org/artist/{aid}" if aid else "", "Artist": artist.get("name", ""), "Country": artist.get("country", "")})
+
+MusicBrainzConnector._recording_to_row = _mb_recording_to_row
+MusicBrainzConnector._label_to_row = _mb_label_to_row
+MusicBrainzConnector._artist_to_row = _mb_artist_to_row
