@@ -128,24 +128,40 @@ def source_settings_ui(source_key: str) -> dict:
     return {}
 
 
+
+def source_runtime_status(source_key: str) -> str:
+    if source_key == "amazon":
+        return "Planned"
+    if source_key == "discogs":
+        return "Connected" if get_secret("DISCOGS_TOKEN") else "Not configured"
+    if source_key == "musicbrainz":
+        return "Available without credentials"
+    if source_key == "spotify":
+        return "Connected" if get_secret("SPOTIFY_CLIENT_ID") and get_secret("SPOTIFY_CLIENT_SECRET") else "Not configured"
+    if source_key == "apple":
+        return "Connected" if get_secret("APPLE_MUSIC_DEVELOPER_TOKEN") else "Available without credentials"
+    return SOURCE_REGISTRY[source_key].status
+
 def create_source_connector(source_key: str, settings: dict):
     definition = SOURCE_REGISTRY[source_key]
     return definition.create_connector(settings)
 
 
 def lookup_barcode(source_key: str, barcode: str, settings: dict) -> list[dict]:
-    connector = create_source_connector(source_key, settings)
-    return connector.lookup(barcode=barcode)
+    cache_key = (source_key, barcode, tuple(sorted((settings or {}).items())))
+    cache = st.session_state.setdefault("lookup_cache", {})
+    if cache_key not in cache:
+        connector = create_source_connector(source_key, settings)
+        cache[cache_key] = connector.lookup(barcode=barcode)
+    return cache[cache_key]
 
 
 def run_bulk_lookup(
-    source_key: str,
+    source_keys: list[str],
     source_df: pd.DataFrame,
     barcode_column: str,
-    settings: dict,
+    settings_by_source: dict[str, dict],
 ) -> pd.DataFrame:
-    source_definition = SOURCE_REGISTRY[source_key]
-    connector = source_definition.create_connector(settings)
 
     output_rows: list[dict] = []
     total = len(source_df)
@@ -158,8 +174,6 @@ def run_bulk_lookup(
 
         input_data = original_row.to_dict()
         input_data["Lookup UPC/EAN"] = barcode
-        input_data["Source"] = source_definition.display_name
-
         if not barcode:
             output_rows.append({
                 **input_data,
@@ -171,35 +185,18 @@ def run_bulk_lookup(
             progress.progress(idx / total)
             continue
 
-        try:
-            records = connector.lookup(barcode=barcode)
-
-            if not records:
-                output_rows.append({
-                    **input_data,
-                    "Lookup Status": "No results",
-                    "Result Number": "",
-                    "Results For Barcode": 0,
-                })
-            else:
-                total_results = len(records)
-                for result_number, record in enumerate(records, start=1):
-                    output_rows.append({
-                        **input_data,
-                        "Lookup Status": "Found",
-                        "Result Number": result_number,
-                        "Results For Barcode": total_results,
-                        **record,
-                    })
-
-        except SourceError as exc:
-            output_rows.append({
-                **input_data,
-                "Lookup Status": "Error",
-                "Result Number": "",
-                "Results For Barcode": 0,
-                "Error": str(exc),
-            })
+        for source_key in source_keys:
+            source_definition = SOURCE_REGISTRY[source_key]
+            try:
+                records = lookup_barcode(source_key, barcode, settings_by_source.get(source_key, {}))
+                if not records:
+                    output_rows.append({**input_data, "Source": source_definition.display_name, "Lookup Status": "No results", "Result Number": "", "Results For Barcode": 0})
+                else:
+                    total_results = len(records)
+                    for result_number, record in enumerate(records, start=1):
+                        output_rows.append({**input_data, "Lookup Status": "Found", "Result Number": result_number, "Results For Barcode": total_results, **record})
+            except SourceError as exc:
+                output_rows.append({**input_data, "Source": source_definition.display_name, "Lookup Status": "Error", "Result Number": "", "Results For Barcode": 0, "Error": str(exc)})
 
         progress.progress(idx / total)
 
@@ -267,13 +264,14 @@ with search_tab:
         key for key, definition in SOURCE_REGISTRY.items() if definition.enabled
     ]
 
-    source_key = st.selectbox(
-        "Source",
+    selected_sources = st.multiselect(
+        "Sources",
         options=available_sources,
+        default=[available_sources[0]] if available_sources else [],
         format_func=lambda key: SOURCE_REGISTRY[key].display_name,
     )
 
-    settings = source_settings_ui(source_key)
+    settings_by_source = {key: source_settings_ui(key) for key in selected_sources}
 
     if mode == "Single Lookup":
         st.subheader("Single Lookup")
@@ -291,12 +289,15 @@ with search_tab:
             barcode = normalise_barcode(barcode_input)
 
             try:
-                records = lookup_barcode(source_key, barcode, settings)
-                results_df = pd.DataFrame(records)
-                if not results_df.empty:
-                    results_df.insert(0, "Lookup UPC/EAN", barcode)
-                    results_df.insert(1, "Source", SOURCE_REGISTRY[source_key].display_name)
-                st.session_state["single_results"] = results_df
+                all_rows = []
+                for source_key in selected_sources:
+                    try:
+                        records = lookup_barcode(source_key, barcode, settings_by_source.get(source_key, {}))
+                        for n, record in enumerate(records, start=1):
+                            all_rows.append({"Lookup UPC/EAN": barcode, "Lookup Status": "Found", "Result Number": n, "Results For Barcode": len(records), **record})
+                    except SourceError as exc:
+                        all_rows.append({"Lookup UPC/EAN": barcode, "Source": SOURCE_REGISTRY[source_key].display_name, "Lookup Status": "Error", "Error": str(exc)})
+                st.session_state["single_results"] = pd.DataFrame(all_rows)
             except SourceError as exc:
                 st.error(str(exc))
 
@@ -347,10 +348,10 @@ with search_tab:
 
                 if st.button("Run bulk lookup", type="primary"):
                     results_df = run_bulk_lookup(
-                        source_key,
+                        selected_sources,
                         source_df,
                         barcode_column,
-                        settings,
+                        settings_by_source,
                     )
                     st.session_state["bulk_results"] = results_df
 
@@ -386,7 +387,7 @@ with sources_tab:
     for definition in SOURCE_REGISTRY.values():
         source_rows.append({
             "Source": definition.display_name,
-            "Status": definition.status,
+            "Status": source_runtime_status(definition.key),
             "Enabled": definition.enabled,
             "Configuration": ", ".join(definition.required_secret_names) or "No credentials required",
             "Purpose": definition.description,
@@ -395,7 +396,7 @@ with sources_tab:
 
 with settings_tab:
     st.subheader("Settings")
-    st.write("Catalogue Scraper reads credentials from Streamlit Secrets or environment variables.")
+    st.write("Catalogue Scraper reads credentials from Streamlit Secrets or environment variables. Spotify requires SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET. Apple Music uses APPLE_MUSIC_DEVELOPER_TOKEN; without it, the public iTunes Lookup fallback is used. Amazon is planned while access is being arranged.")
     settings_rows = []
     for definition in SOURCE_REGISTRY.values():
         for secret_name in definition.required_secret_names:
