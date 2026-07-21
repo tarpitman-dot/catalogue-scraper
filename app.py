@@ -128,10 +128,14 @@ def source_settings_ui(source_key: str) -> dict:
     return {}
 
 
-def lookup_barcode(source_key: str, barcode: str, settings: dict) -> list[dict]:
+def create_source_connector(source_key: str, settings: dict):
     definition = SOURCE_REGISTRY[source_key]
-    connector = definition.connector_factory(settings)
-    return connector.lookup_all(barcode=barcode)
+    return definition.create_connector(settings)
+
+
+def lookup_barcode(source_key: str, barcode: str, settings: dict) -> list[dict]:
+    connector = create_source_connector(source_key, settings)
+    return connector.lookup(barcode=barcode)
 
 
 def run_bulk_lookup(
@@ -141,7 +145,7 @@ def run_bulk_lookup(
     settings: dict,
 ) -> pd.DataFrame:
     source_definition = SOURCE_REGISTRY[source_key]
-    connector = source_definition.connector_factory(settings)
+    connector = source_definition.create_connector(settings)
 
     output_rows: list[dict] = []
     total = len(source_df)
@@ -168,7 +172,7 @@ def run_bulk_lookup(
             continue
 
         try:
-            records = connector.lookup_all(barcode=barcode)
+            records = connector.lookup(barcode=barcode)
 
             if not records:
                 output_rows.append({
@@ -248,139 +252,156 @@ def render_single_result_cards(df: pd.DataFrame) -> None:
 
 st.set_page_config(page_title=APP_NAME, page_icon="💿", layout="wide")
 st.title(APP_NAME)
-st.caption("Catalogue lookup and bulk metadata export from multiple sources.")
+st.caption("Multi-source catalogue research and bulk metadata export.")
 
-mode = st.radio(
-    "Mode",
-    options=["Single Lookup", "Bulk Lookup"],
-    horizontal=True,
-)
+search_tab, sources_tab, settings_tab = st.tabs(["Search", "Sources", "Settings"])
 
-available_sources = [
-    key for key, definition in SOURCE_REGISTRY.items() if definition.enabled
-]
-
-source_key = st.selectbox(
-    "Source",
-    options=available_sources,
-    format_func=lambda key: SOURCE_REGISTRY[key].display_name,
-)
-
-settings = source_settings_ui(source_key)
-
-if mode == "Single Lookup":
-    st.subheader("Single Lookup")
-
-    barcode_input = st.text_input(
-        "UPC / EAN",
-        placeholder="Paste one barcode",
+with search_tab:
+    mode = st.radio(
+        "Search mode",
+        options=["Single Lookup", "Bulk Lookup"],
+        horizontal=True,
     )
 
-    if st.button(
-        "Search catalogue",
-        type="primary",
-        disabled=not bool(normalise_barcode(barcode_input)),
-    ):
-        barcode = normalise_barcode(barcode_input)
+    available_sources = [
+        key for key, definition in SOURCE_REGISTRY.items() if definition.enabled
+    ]
 
-        try:
-            records = lookup_barcode(source_key, barcode, settings)
-            results_df = pd.DataFrame(records)
-            if not results_df.empty:
-                results_df.insert(0, "Lookup UPC/EAN", barcode)
-                results_df.insert(1, "Source", SOURCE_REGISTRY[source_key].display_name)
-            st.session_state["single_results"] = results_df
-        except SourceError as exc:
-            st.error(str(exc))
+    source_key = st.selectbox(
+        "Source",
+        options=available_sources,
+        format_func=lambda key: SOURCE_REGISTRY[key].display_name,
+    )
 
-    if "single_results" in st.session_state:
-        single_df = st.session_state["single_results"]
+    settings = source_settings_ui(source_key)
 
-        st.write(f"**Results:** {len(single_df)}")
-        render_single_result_cards(single_df)
+    if mode == "Single Lookup":
+        st.subheader("Single Lookup")
 
-        if not single_df.empty:
-            with st.expander("View as table"):
-                st.dataframe(single_df, use_container_width=True, hide_index=True)
+        barcode_input = st.text_input(
+            "UPC / EAN",
+            placeholder="Paste one barcode",
+        )
+
+        if st.button(
+            "Search catalogue",
+            type="primary",
+            disabled=not bool(normalise_barcode(barcode_input)),
+        ):
+            barcode = normalise_barcode(barcode_input)
+
+            try:
+                records = lookup_barcode(source_key, barcode, settings)
+                results_df = pd.DataFrame(records)
+                if not results_df.empty:
+                    results_df.insert(0, "Lookup UPC/EAN", barcode)
+                    results_df.insert(1, "Source", SOURCE_REGISTRY[source_key].display_name)
+                st.session_state["single_results"] = results_df
+            except SourceError as exc:
+                st.error(str(exc))
+
+        if "single_results" in st.session_state:
+            single_df = st.session_state["single_results"]
+
+            st.write(f"**Results:** {len(single_df)}")
+            render_single_result_cards(single_df)
+
+            if not single_df.empty:
+                with st.expander("View as table"):
+                    st.dataframe(single_df, use_container_width=True, hide_index=True)
+
+                st.download_button(
+                    "Download single lookup Excel",
+                    data=excel_bytes(single_df),
+                    file_name="catalogue_scraper_single_lookup.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+
+    else:
+        st.subheader("Bulk Lookup")
+
+        uploaded = st.file_uploader(
+            "Upload an Excel or CSV file containing UPCs/EANs",
+            type=["xlsx", "xls", "csv"],
+        )
+
+        if uploaded is not None:
+            try:
+                source_df = read_input(uploaded)
+            except Exception as exc:
+                st.error(str(exc))
+                st.stop()
+
+            if source_df.empty:
+                st.warning("The uploaded file contains no rows.")
+            else:
+                barcode_column = st.selectbox(
+                    "Which column contains the UPC/EAN?",
+                    options=list(source_df.columns),
+                    index=0,
+                )
+
+                preview = source_df.copy()
+                preview["_Cleaned UPC/EAN"] = preview[barcode_column].map(normalise_barcode)
+                st.dataframe(preview.head(50), use_container_width=True, hide_index=True)
+
+                if st.button("Run bulk lookup", type="primary"):
+                    results_df = run_bulk_lookup(
+                        source_key,
+                        source_df,
+                        barcode_column,
+                        settings,
+                    )
+                    st.session_state["bulk_results"] = results_df
+
+        if "bulk_results" in st.session_state:
+            results_df = st.session_state["bulk_results"]
+
+            st.subheader("Bulk results")
+            st.dataframe(results_df, use_container_width=True, hide_index=True)
+
+            found_rows = int((results_df["Lookup Status"] == "Found").sum())
+            unique_barcodes = int(
+                results_df.loc[
+                    results_df["Lookup Status"] == "Found", "Lookup UPC/EAN"
+                ].nunique()
+            )
+            no_results = int((results_df["Lookup Status"] == "No results").sum())
+
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Rows returned", found_rows)
+            c2.metric("Barcodes with results", unique_barcodes)
+            c3.metric("Barcodes with no results", no_results)
 
             st.download_button(
-                "Download single lookup Excel",
-                data=excel_bytes(single_df),
-                file_name="catalogue_scraper_single_lookup.xlsx",
+                "Download bulk Excel",
+                data=excel_bytes(results_df),
+                file_name="catalogue_scraper_bulk_results.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )
 
-else:
-    st.subheader("Bulk Lookup")
-
-    uploaded = st.file_uploader(
-        "Upload an Excel or CSV file containing UPCs/EANs",
-        type=["xlsx", "xls", "csv"],
-    )
-
-    if uploaded is not None:
-        try:
-            source_df = read_input(uploaded)
-        except Exception as exc:
-            st.error(str(exc))
-            st.stop()
-
-        if source_df.empty:
-            st.warning("The uploaded file contains no rows.")
-        else:
-            barcode_column = st.selectbox(
-                "Which column contains the UPC/EAN?",
-                options=list(source_df.columns),
-                index=0,
-            )
-
-            preview = source_df.copy()
-            preview["_Cleaned UPC/EAN"] = preview[barcode_column].map(normalise_barcode)
-            st.dataframe(preview.head(50), use_container_width=True, hide_index=True)
-
-            if st.button("Run bulk lookup", type="primary"):
-                results_df = run_bulk_lookup(
-                    source_key,
-                    source_df,
-                    barcode_column,
-                    settings,
-                )
-                st.session_state["bulk_results"] = results_df
-
-    if "bulk_results" in st.session_state:
-        results_df = st.session_state["bulk_results"]
-
-        st.subheader("Bulk results")
-        st.dataframe(results_df, use_container_width=True, hide_index=True)
-
-        found_rows = int((results_df["Lookup Status"] == "Found").sum())
-        unique_barcodes = int(
-            results_df.loc[
-                results_df["Lookup Status"] == "Found", "Lookup UPC/EAN"
-            ].nunique()
-        )
-        no_results = int((results_df["Lookup Status"] == "No results").sum())
-
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Rows returned", found_rows)
-        c2.metric("Barcodes with results", unique_barcodes)
-        c3.metric("Barcodes with no results", no_results)
-
-        st.download_button(
-            "Download bulk Excel",
-            data=excel_bytes(results_df),
-            file_name="catalogue_scraper_bulk_results.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        )
-
-st.divider()
-with st.expander("Source roadmap"):
-    roadmap = pd.DataFrame([
-        {
+with sources_tab:
+    st.subheader("Sources")
+    source_rows = []
+    for definition in SOURCE_REGISTRY.values():
+        source_rows.append({
             "Source": definition.display_name,
-            "Status": "Available" if definition.enabled else "Planned",
+            "Status": definition.status,
+            "Enabled": definition.enabled,
+            "Configuration": ", ".join(definition.required_secret_names) or "No credentials required",
             "Purpose": definition.description,
-        }
-        for definition in SOURCE_REGISTRY.values()
-    ])
-    st.dataframe(roadmap, use_container_width=True, hide_index=True)
+        })
+    st.dataframe(pd.DataFrame(source_rows), use_container_width=True, hide_index=True)
+
+with settings_tab:
+    st.subheader("Settings")
+    st.write("Catalogue Scraper reads credentials from Streamlit Secrets or environment variables.")
+    settings_rows = []
+    for definition in SOURCE_REGISTRY.values():
+        for secret_name in definition.required_secret_names:
+            settings_rows.append({
+                "Source": definition.display_name,
+                "Secret": secret_name,
+                "Configured": bool(get_secret(secret_name)),
+            })
+    st.dataframe(pd.DataFrame(settings_rows), use_container_width=True, hide_index=True)
